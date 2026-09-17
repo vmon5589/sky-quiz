@@ -1,0 +1,17 @@
+# Compiled Python: a .pyc embeds the ABSOLUTE path of the file it was built
+# from (/Users/<you>/...), so these carry a home directory into the history.
+__pycache__/
+*.pyc
+
+# The installation this borrows a sky from is next door and is not part of
+# this repository. Never let a copy of it in: output/ holds the capture
+# folders, the observation dates and the site coordinates.
+output/
+spectra_webapp/
+*.bak
+.DS_Store
+.env
+
+# The long-form notes stay local: they describe one installation.
+NOTES.md
+HANDOFF.md
