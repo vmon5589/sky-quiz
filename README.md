@@ -43,16 +43,25 @@ allowed to fetch its own data.
 | `docs/` | the same quiz baked static, for Pages |
 | `test_quiz.js` | the tests — `node test_quiz.js` |
 
-## Rebuilding the static site
+## Keeping the published site current
 
-`docs/` is a build artifact but it is committed, because Pages serves it from
-the branch. After any change to `quiz.html` or the catalogues:
+`docs/` is a build artifact, but it is committed, because Pages serves it
+**from the branch**. So the live site is the bake, not the source: pushing a
+change to `quiz.html` on its own changes nothing anyone can see.
 
-    python build_pages.py
-    python build_pages.py --check
+| what changed | rebuild with |
+|---|---|
+| `quiz.html`, `sky_catalog.json`, `star_facts.json` | `python build_pages.py` |
+| new spectra in the pipeline | `python export_spectra.py`, then `python build_pages.py` |
+| the year turned over | `python build_pages.py` — the planets are baked for one year, and the page says which |
 
-and commit `docs/` along with the change. `--check` is what tells you it has
-gone stale.
+Then check it, commit `docs/` with the change, and push:
+
+    python build_pages.py --check      # says STALE if docs/ is behind
+    node test_quiz.js
+
+Pages redeploys within a minute of the push. Hard-refresh the page after it
+does — a plain reload will often hand you the cached `data.json`.
 
 ## The spectra
 

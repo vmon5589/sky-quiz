@@ -62,13 +62,25 @@ function ctx2d() {
   });
 }
 
+// A custom property (`--sheet`) can only be set through setProperty -- an
+// assignment to style['--sheet'] does nothing in a real browser -- so the
+// stub has to carry those two methods or the page's own resize path throws.
+function styleObj() {
+  const t = {};
+  const def = (k, fn) => Object.defineProperty(t, k, { value: fn, enumerable: false });
+  def('setProperty', (k, v) => { t[k] = String(v); });
+  def('removeProperty', k => { delete t[k]; });
+  def('getPropertyValue', k => (k in t ? t[k] : ''));
+  return new Proxy(t, { get: (o, k) => (k in o ? o[k] : ''),
+                        set: (o, k, v) => { o[k] = v; return true; } });
+}
+
 let ELEMS = new Map();
 function mkEl(id, tag) {
   const cls = new Set();
   const el = {
     id, tagName: (tag || 'div').toUpperCase(),
-    style: new Proxy({}, { get: (t, k) => (k in t ? t[k] : ''),
-                           set: (t, k, v) => { t[k] = v; return true; } }),
+    style: styleObj(),
     dataset: {}, children: [], value: '', textContent: '', title: '',
     _html: '',
     get innerHTML() { return this._html; },
@@ -86,7 +98,8 @@ function mkEl(id, tag) {
     // reach the quiz" is a thing worth testing through the real binding
     // rather than by assigning to the variable behind it.
     addEventListener: (ev, fn) => { (el._on[ev] = el._on[ev] || []).push(fn); },
-    _fire: ev => (el._on[ev] || []).forEach(fn => fn({ target: el, preventDefault: noop })),
+    _fire: (ev, extra) => (el._on[ev] || []).forEach(
+      fn => fn(Object.assign({ target: el, preventDefault: noop }, extra))),
     removeEventListener: noop, focus: noop, blur: noop,
     select: noop, remove: noop, setPointerCapture: noop,
     // Recorded rather than dropped: the sky view builds its floating panels
@@ -239,6 +252,10 @@ src += '\n;globalThis.__page = { build, resize, quizBoot, nextQuestion, answer, 
      + 'get yaw() { return yaw; }, get pitch() { return pitch; }, '
      + 'get SKY_INSET() { return SKY_INSET; }, set SKY_INSET(v) { SKY_INSET = v; }, '
      + 'visH, oy0, focalOf, touchSlop, syncSheet, unproject, camera, '
+     + 'SNAPS, SHEET_MIN, sheetMax, cycleSnap, setSheetPx, '
+     + 'get snapAt() { return snapAt; }, set snapAt(v) { snapAt = v; }, '
+     + 'get sheetPx() { return sheetPx; }, '
+     + 'get sheetDrag() { return sheetDrag; }, '
      + 'zoomTo, zoomAbout, sizeOf, starScale, STAR_REF, STAR_KNEE, '
      + 'get PHONE() { return PHONE; }, set PHONE(v) { PHONE = v; }, '
      + 'TOUCHES, zoomField, get PINCHED() { return PINCHED; }, '
@@ -2006,6 +2023,79 @@ ok(P.QUIZ.best === 25, `best streak kept: ${P.QUIZ.best}`);
   ok(P.oy0() === P.H() / 2, 'the origin did not go back with the sheet gone');
   console.log(`  sheet: 8 boards framed clear of a ${INSET}px sheet on a `
     + `${P.W()}x${P.H()} canvas`);
+}
+
+// ============================================ the grab bar
+// The one control on the phone that is not a button doing a button's job: it
+// cycles three snaps when tapped and sets any height when dragged. Both live
+// on pointer events, because a `click` is the part a browser may decide not
+// to send -- and the bug this replaced was a bar that did nothing at all.
+{
+  const el = document.getElementById('sheetgrab');
+  const railEl = document.getElementById('rail');
+  const wasInset = P.SKY_INSET, wasSnap = P.snapAt, wasPhone = P.PHONE;
+  global.window.matchMedia = q => ({ matches: /max-width:\s*720px/.test(q) });
+  const height = () => railEl.style['--sheet'];
+  const snapClass = () => P.SNAPS.filter(c => document.body.classList.contains(c));
+  const tap = y => { el._fire('pointerdown', { clientY: y, pointerId: 1 });
+                     el._fire('pointerup', { clientY: y, pointerId: 1 }); };
+  const drag = (from, to) => {
+    el._fire('pointerdown', { clientY: from, pointerId: 1 });
+    el._fire('pointermove', { clientY: to, pointerId: 1 });
+    el._fire('pointerup', { clientY: to, pointerId: 1 });
+  };
+
+  P.snapAt = 1;
+  P.syncSheet(false);
+  ok(snapClass().join() === 'sheet-half', `the sheet starts at ${snapClass()}`);
+
+  // a tap cycles, and goes round
+  tap(500);
+  ok(snapClass().join() === 'sheet-full', `a tap gave ${snapClass()}, wanted full`);
+  tap(500);
+  ok(snapClass().join() === 'sheet-peek', `a second tap gave ${snapClass()}`);
+  tap(500);
+  ok(snapClass().join() === 'sheet-half', 'three taps did not come back round');
+
+  // the click a browser sends after the tap must not cycle it again
+  const after = snapClass().join();
+  el.onclick({ preventDefault: () => {} });
+  ok(snapClass().join() === after, 'the synthetic click cycled the sheet twice');
+
+  // a drag sets a height of its own, and the snaps step aside for it
+  drag(600, 1000);                        // 400px DOWN: a shorter sheet
+  ok(P.sheetPx === 500, `a 400px drag down gave ${P.sheetPx}px, wanted 500`);
+  ok(height() === '500px', `--sheet is ${height()}`);
+  ok(snapClass().length === 0, `a dragged sheet still wears ${snapClass()}`);
+  ok(P.snapAt === 1, 'a drag moved the snap the next tap will use');
+
+  // and it cannot be dragged off either end
+  drag(600, 4000);
+  ok(P.sheetPx === P.SHEET_MIN, `dragged past the bottom to ${P.sheetPx}px`);
+  drag(600, -4000);
+  ok(P.sheetPx === P.sheetMax(), `dragged past the top to ${P.sheetPx}px`);
+
+  // a finger that holds still is a tap, not a drag of zero
+  drag(600, 597);
+  ok(P.sheetPx === null, 'a 3px wobble was taken as a drag');
+  ok(snapClass().join() === 'sheet-full', `a wobble gave ${snapClass()}`);
+
+  // the keyboard, where there is no pointer at all
+  el._fire('keydown', { key: 'Enter' });
+  ok(snapClass().join() === 'sheet-peek', `Enter gave ${snapClass()}`);
+
+  // and none of it happens on a desktop, where there is no sheet
+  P.PHONE = false;
+  el._fire('pointerdown', { clientY: 600, pointerId: 1 });
+  ok(P.sheetDrag === null, 'the grab bar started a drag on a desktop');
+
+  delete global.window.matchMedia;
+  P.snapAt = wasSnap; P.PHONE = wasPhone;
+  P.setSheetPx(null);
+  P.syncSheet(false);
+  P.SKY_INSET = wasInset;
+  console.log('  grab bar: taps cycle peek/half/full, drags set any height '
+    + `between ${P.SHEET_MIN} and ${P.sheetMax()}px, and the sky re-frames on release`);
 }
 
 // ============================================ the desktop frame, pinned

@@ -473,14 +473,28 @@
     #brand     { display: none; }
 
     /* The grab bar. It stays put while the sheet scrolls under it, because
-       the way out of a full sheet must not be something you scroll to find. */
+       the way out of a full sheet must not be something you scroll to find.
+
+       32px of it, not the 20px it was: the dash is 4px and the rest is the
+       part a finger actually lands on, at the top edge of the sheet with the
+       sky right above it -- aim high by a few pixels and the tap went to the
+       canvas, which is a control that does nothing rather than a control that
+       is hard to hit. `touch-action: none` because the bar is DRAGGED: without
+       it the first millimetre scrolls the sheet's own content instead. */
     #sheetgrab { display: block; position: sticky; top: 0; z-index: 2;
-                 margin: 0 -13px; padding: 9px 0 7px;
+                 margin: 0 -13px; padding: 15px 0 13px;
                  background: linear-gradient(var(--panel) 72%, transparent);
-                 border: none; width: calc(100% + 26px); cursor: pointer; }
+                 border: none; width: calc(100% + 26px); cursor: grab;
+                 touch-action: none; -webkit-user-select: none;
+                 user-select: none; -webkit-tap-highlight-color: transparent; }
+    #sheetgrab:active { cursor: grabbing; }
     #sheetgrab::before { content: ''; display: block; width: 42px; height: 4px;
                  margin: 0 auto; border-radius: 3px; background: #4d5662; }
     #sheetgrab:active::before { background: var(--run); }
+
+    /* While a finger is on the bar the height IS the finger: a .22s ease on
+       top of that is the sheet arriving where the finger was a moment ago. */
+    body.sheet-dragging #rail { transition: none; }
 
     /* A finger is about 44px and does not get bigger when the text does, so
        these stay in px while the type around them stays in rem. */
@@ -6180,7 +6194,12 @@ function syncSheet(reframe) {
   const phone = PHONE = isPhone();
   qel('sheetgrab').style.display = phone ? 'block' : 'none';
   for (const c of SNAPS) document.body.classList.remove(c);
-  if (phone) document.body.classList.add(SNAPS[snapAt]);
+  // A dragged height outranks the snaps and is re-clamped instead: the screen
+  // it was dragged on may since have rotated, and 88% of the old one can be
+  // taller than the new one is. Off a phone there is no sheet to be tall.
+  if (!phone) setSheetPx(null);
+  else if (sheetPx !== null) setSheetPx(sheetPx);
+  else document.body.classList.add(SNAPS[snapAt]);
   const was = SKY_INSET;
   // The sheet is over the canvas, so what it covers is its height -- except
   // when the rail is folded away entirely, which is still the desktop's own
@@ -6201,12 +6220,83 @@ function reframeForSheet() {
   } catch (e) { /* a re-frame is a convenience, never a crash */ }
 }
 
-qel('sheetgrab').onclick = () => {
+// The bar is dragged as well as tapped. A tap cycles the three snaps, which
+// is the quickest way to a height you already know; a drag puts the sheet
+// anywhere between SHEET_MIN and most of the screen, which is the thing a
+// snap cannot do -- read four options AND see the star being asked about, on
+// a screen whose size neither of us picked.
+//
+// A dragged height is written to --sheet as pixels, and an inline custom
+// property outranks the one the snap classes set, so it is tracked here and
+// cleared by the next tap. Two things saying how tall the sheet is would
+// otherwise disagree at the first rotation.
+const SHEET_MIN = 92;
+const sheetMax = () => Math.max(SHEET_MIN + 40,
+                                Math.round((window.innerHeight || 800) * 0.92));
+let sheetPx = null;          // a dragged height in px, or null while snaps rule
+let sheetDrag = null;
+
+function setSheetPx(px) {
+  sheetPx = px === null ? null
+    : Math.max(SHEET_MIN, Math.min(sheetMax(), Math.round(px)));
+  if (!rail || !rail.style) return;
+  if (sheetPx === null) rail.style.removeProperty('--sheet');
+  else rail.style.setProperty('--sheet', sheetPx + 'px');
+}
+
+function cycleSnap() {
+  setSheetPx(null);
+  for (const c of SNAPS) document.body.classList.remove(c);
   snapAt = (snapAt + 1) % SNAPS.length;
   // the height is a transition, so the inset is read after it lands
   syncSheet(false);
   setTimeout(() => syncSheet(true), 240);
-};
+}
+
+// Pointer events, not touch: one path then serves a finger, a mouse on a
+// narrow window and the harness. The tap is taken on pointerup rather than
+// on click, because a `click` is the one part of this a browser may decide
+// not to send -- and a control that sometimes does nothing is the bug being
+// fixed here, not a detail of it.
+const SHEET_SLOP = 4;        // below this a finger is holding still, not dragging
+const grabEl = qel('sheetgrab');
+
+grabEl.addEventListener('pointerdown', e => {
+  if (!PHONE) return;
+  const h = (rail && rail.getBoundingClientRect().height) || sheetPx || 0;
+  sheetDrag = { y: e.clientY, h, moved: false, id: e.pointerId };
+  document.body.classList.add('sheet-dragging');
+  try { grabEl.setPointerCapture(e.pointerId); } catch (_) { /* no capture, no matter */ }
+});
+
+grabEl.addEventListener('pointermove', e => {
+  if (!sheetDrag) return;
+  const dy = sheetDrag.y - e.clientY;            // up is taller
+  if (Math.abs(dy) > SHEET_SLOP) sheetDrag.moved = true;
+  // Only the height moves while the finger is down. The sky is re-framed on
+  // release: reading the rail's box per move is a forced layout per frame,
+  // which is the reason ex()/ey() exist.
+  if (sheetDrag.moved) setSheetPx(sheetDrag.h + dy);
+  if (e.preventDefault) e.preventDefault();
+});
+
+function endSheetDrag(e) {
+  if (!sheetDrag) return;
+  const moved = sheetDrag.moved;
+  try { grabEl.releasePointerCapture(sheetDrag.id); } catch (_) { /* as above */ }
+  sheetDrag = null;
+  document.body.classList.remove('sheet-dragging');
+  if (moved) syncSheet(true);                    // the sky follows on release
+  else cycleSnap();
+}
+grabEl.addEventListener('pointerup', endSheetDrag);
+grabEl.addEventListener('pointercancel', endSheetDrag);
+// Handled above; the synthetic click that follows a tap must not cycle twice.
+grabEl.onclick = e => { if (e && e.preventDefault) e.preventDefault(); };
+// ... which leaves the keyboard, where there is no pointer at all.
+grabEl.addEventListener('keydown', e => {
+  if (e.key === 'Enter' || e.key === ' ') { cycleSnap(); e.preventDefault(); }
+});
 
 // ---- two fingers ---------------------------------------------------------
 // Zoom rides on `wheel`, which a touch screen never fires, so without this
