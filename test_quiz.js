@@ -237,6 +237,8 @@ src += '\n;globalThis.__page = { build, resize, quizBoot, nextQuestion, answer, 
      + 'renderQuiz, draw, QUIZ, GENERATORS, CONS: () => CONS, sepPA, octOf, '
      + 'conName, conGen, starName, properName, bayerName, kindWords, lumWord, '
      + 'get ISOLATE() { return ISOLATE; }, get ISOLATE_STARS() { return ISOLATE_STARS; }, '
+     + 'get ISOLATE_NEAR() { return ISOLATE_NEAR; }, nearCon, showCon, '
+     + 'reviewNeighbours, reviewIsolate, REVIEW_NEAR_MAX, '
      + 'STARS: () => STARS, CON_ORDER: () => CON_ORDER, CON_PARTS, '
      + 'get PARTS_OK() { return PARTS_OK; }, CON_GEN, CON_NAMES, pool, '
      + 'get MARKED() { return MARKED; }, get showLabels() { return showLabels; }, '
@@ -2096,6 +2098,59 @@ ok(P.QUIZ.best === 25, `best streak kept: ${P.QUIZ.best}`);
   P.SKY_INSET = wasInset;
   console.log('  grab bar: taps cycle peek/half/full, drags set any height '
     + `between ${P.SHEET_MIN} and ${P.sheetMax()}px, and the sky re-frames on release`);
+}
+
+// ============================================ the ring around a board
+// A review group is a teaching order; the quiz is under no such rule and will
+// ask you to tell one of its shapes from a shape no board contains. So a
+// board draws the prominent neighbours too -- faintly, unplaceable, and
+// outside the frame it opens at, which is the whole of the design: found by
+// turning the sky, never in the way of the board.
+{
+  const R = P.REVIEW;
+  const wasOn = R.on, wasKind = R.kind, wasGroup = R.group, wasNear = R.near;
+  P.setMode(true);
+  R.kind = 'shapes';
+  const rings = [];
+  for (let g = 0; g < P.REVIEW_GROUPS.length; g++) {
+    R.group = g; R.near = true;
+    P.buildBoard(); P.reviewPose(); settle();
+    const grp = P.REVIEW_GROUPS[g];
+    const ring = P.reviewNeighbours(grp.cons);
+    rings.push(`${grp.cons.length}+${ring.length}`);
+    ok(ring.length > 0 && ring.length <= P.REVIEW_NEAR_MAX,
+       `${grp.id}: a ring of ${ring.length}`);
+    ok(!ring.some(a => grp.cons.includes(a)),
+       `${grp.id}: the ring repeats one of the board's own shapes`);
+
+    // drawn, and drawn as context
+    for (const a of ring) {
+      ok(P.showCon(a), `${grp.id}: ${a} is in the ring and not drawn`);
+      ok(P.nearCon(a), `${grp.id}: ${a} is drawn as if it were the board`);
+      ok(P.conStars(a).every(st => P.ISOLATE_STARS.has(st)),
+         `${grp.id}: ${a}'s stars are cut away under its own figure`);
+    }
+    for (const a of grp.cons)
+      ok(!P.nearCon(a), `${grp.id}: the board's own ${a} is drawn as a neighbour`);
+
+    // never a target: a name cannot be placed on one
+    const keys = new Set(P.REVIEW.targets.map(t => t.key));
+    ok(!ring.some(a => keys.has(a)), `${grp.id}: a neighbour is a target`);
+
+    // and the board opens exactly where it opened without them
+    const withRing = [P.yaw, P.pitch, P.fovDeg];
+    R.near = false;
+    P.reviewIsolate(); P.reviewPose(); settle();
+    const without = [P.yaw, P.pitch, P.fovDeg];
+    ok(withRing.every((v, i) => Math.abs(v - without[i]) < 1e-9),
+       `${grp.id}: the ring moved the frame the board opens at`);
+    ok(P.ISOLATE_NEAR === null, `${grp.id}: the ring is still set with it off`);
+    ok(!P.showCon(ring[0]), `${grp.id}: ${ring[0]} is still drawn with the ring off`);
+  }
+
+  R.near = wasNear; R.group = wasGroup; R.kind = wasKind;
+  P.buildBoard(); P.setMode(wasOn); settle();
+  console.log(`  ring: shapes on the board + neighbours off it, per group — ${rings.join(', ')}`);
 }
 
 // ============================================ the desktop frame, pinned

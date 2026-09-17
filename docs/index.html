@@ -896,6 +896,14 @@ let proj = [];           // per-frame [{s, x, y, r}] for hit-testing
 // their figures are built from -- so "only Orion, and the rest black" is one
 // assignment rather than a second drawing path. Null the rest of the time.
 let ISOLATE = null, ISOLATE_STARS = null;
+// The ring of sky just outside an isolated board: drawn, but as context. A
+// review group is what a beginner learns together, and the quiz is under no
+// such rule -- "which constellation is this?" can put Lyra beside Leo. So a
+// board that blacks out everything but its own six shapes teaches them with
+// nothing to confuse them with, which is the one thing the question will do.
+// These are drawn with a fainter figure, are never targets, and sit outside
+// the frame the board opens at -- so they are found by turning the sky.
+let ISOLATE_NEAR = null;
 // The solar system, off. A `planet` question asks where a body stands on a
 // given date, and a dot you can see is not a question about where it is. Only
 // that generator sets this, and quizSky() clears it for every other one -- the
@@ -1249,67 +1257,77 @@ function draw() {
   // stars are pushed out to real distances the lines stop meaning anything and
   // are faded out; by a little over half way they are gone.
   const figFade = Math.max(0, 1 - depth / 0.55);
-  if (lineMode !== 'off' && !obsOnly && figFade > 0.02) {
-    cx2.strokeStyle = `rgba(130,175,235,${(0.42 * figFade).toFixed(3)})`;
-    cx2.lineWidth = 1;
-    cx2.beginPath();
-    for (const f of FIGS) {
-      if (!showCon(f.con)) continue;
-      const pa = at.get(f.a), pb = at.get(f.b);
-      if (!pa || !pb) continue;
-      // a line to an undrawn star is a line into empty space, and under the
-      // raw cut a figure star is no longer guaranteed to be drawn
-      if (magHidden(f.a) || magHidden(f.b)) continue;
-      // Cull by the angle the segment subtends AT THE CAMERA, not by its
-      // length on screen. Two stars a few degrees apart on the sky can be 20
-      // and 800 parsecs away; the moment they are pushed out to those
-      // distances they sit on opposite sides of the scene, still joined by
-      // their figure line. On the sphere this rejects nothing -- no real
-      // figure segment spans anywhere near FIG_MAX_DEG.
-      const ax = f.a.pos[0] - cam.c[0], ay = f.a.pos[1] - cam.c[1], az = f.a.pos[2] - cam.c[2];
-      const bx = f.b.pos[0] - cam.c[0], by = f.b.pos[1] - cam.c[1], bz = f.b.pos[2] - cam.c[2];
-      const la = Math.hypot(ax, ay, az), lb = Math.hypot(bx, by, bz);
-      if (!la || !lb) continue;
-      const cosSeg = (ax * bx + ay * by + az * bz) / (la * lb);
-      if (cosSeg < FIG_MAX_COS) continue;
-      // Stereographic shows very nearly the whole sphere, so a segment on the
-      // far side of the sky still lands somewhere on the plane. Both endpoints
-      // off screen means the figure is behind you: drawing it puts a chord
-      // across the view that belongs to a constellation you are not looking
-      // at. (It would be wrong as well as unwanted -- this projection maps
-      // great circles to arcs, and a straight line only approximates one over
-      // a short span near the axis.)
-      const M = 120;
-      if ((pa.x < -M || pa.x > W + M || pa.y < -M || pa.y > H + M) &&
-          (pb.x < -M || pb.x > W + M || pb.y < -M || pb.y > H + M)) continue;
-      // Draw the segment as the arc it is, not as a chord. Stereographic maps
-      // a great circle to a circle on the plane, and near the rim of a wide
-      // field the two part company badly -- at the all-sky end a 10 degree
-      // segment 150 degrees off axis bows far off a straight line, because
-      // the radial scale 2k tan(theta/2) is stretching hard out there.
-      //
-      // Interpolating the two POSITIONS in 3D and projecting each step
-      // follows it exactly: every point of the chord lies in the plane that
-      // A, B and the origin span, so seen from the Earth it sits on their
-      // great circle. Off the sphere the same interpolation walks the real
-      // line between two real positions, which is what a segment means there.
-      // At a normal field this costs a few thousand multiplies and changes
-      // nothing visible, which is the point.
-      const segDeg = Math.acos(Math.max(-1, Math.min(1, cosSeg))) * 180 / Math.PI;
-      const steps = Math.min(16, Math.max(1, Math.ceil(segDeg / 3)));
-      let drawing = false;
-      for (let i = 0; i <= steps; i++) {
-        const t = i / steps;
-        const p = i === 0 ? pa : i === steps ? pb : project([
-          f.a.pos[0] + (f.b.pos[0] - f.a.pos[0]) * t,
-          f.a.pos[1] + (f.b.pos[1] - f.a.pos[1]) * t,
-          f.a.pos[2] + (f.b.pos[2] - f.a.pos[2]) * t], cam);
-        if (!p) { drawing = false; continue; }  // that step is behind the camera
-        if (drawing) cx2.lineTo(p.x, p.y);
-        else { cx2.moveTo(p.x, p.y); drawing = true; }
+  // Twice: the board's own figures at full weight, then the ring around it
+  // faintly. Without a second pass they would share a path and a colour.
+  for (let fpass = 0; fpass < 2; fpass++) {
+    const fnear = fpass === 1;
+    if (fnear && !(ISOLATE && ISOLATE_NEAR && ISOLATE_NEAR.size)) break;
+    if (lineMode !== 'off' && !obsOnly && figFade > 0.02) {
+      // The ring of neighbours is drawn at a third of the weight: on the
+      // sky beside the board it reads as sky, and next to a shape being
+      // named it reads as not-the-question. One path per weight, because
+      // a stroke per segment is 800 strokes a frame.
+      cx2.strokeStyle = `rgba(130,175,235,${((fnear ? 0.15 : 0.42) * figFade).toFixed(3)})`;
+      cx2.lineWidth = 1;
+      cx2.beginPath();
+      for (const f of FIGS) {
+        if (!showCon(f.con) || nearCon(f.con) !== fnear) continue;
+        const pa = at.get(f.a), pb = at.get(f.b);
+        if (!pa || !pb) continue;
+        // a line to an undrawn star is a line into empty space, and under the
+        // raw cut a figure star is no longer guaranteed to be drawn
+        if (magHidden(f.a) || magHidden(f.b)) continue;
+        // Cull by the angle the segment subtends AT THE CAMERA, not by its
+        // length on screen. Two stars a few degrees apart on the sky can be 20
+        // and 800 parsecs away; the moment they are pushed out to those
+        // distances they sit on opposite sides of the scene, still joined by
+        // their figure line. On the sphere this rejects nothing -- no real
+        // figure segment spans anywhere near FIG_MAX_DEG.
+        const ax = f.a.pos[0] - cam.c[0], ay = f.a.pos[1] - cam.c[1], az = f.a.pos[2] - cam.c[2];
+        const bx = f.b.pos[0] - cam.c[0], by = f.b.pos[1] - cam.c[1], bz = f.b.pos[2] - cam.c[2];
+        const la = Math.hypot(ax, ay, az), lb = Math.hypot(bx, by, bz);
+        if (!la || !lb) continue;
+        const cosSeg = (ax * bx + ay * by + az * bz) / (la * lb);
+        if (cosSeg < FIG_MAX_COS) continue;
+        // Stereographic shows very nearly the whole sphere, so a segment on the
+        // far side of the sky still lands somewhere on the plane. Both endpoints
+        // off screen means the figure is behind you: drawing it puts a chord
+        // across the view that belongs to a constellation you are not looking
+        // at. (It would be wrong as well as unwanted -- this projection maps
+        // great circles to arcs, and a straight line only approximates one over
+        // a short span near the axis.)
+        const M = 120;
+        if ((pa.x < -M || pa.x > W + M || pa.y < -M || pa.y > H + M) &&
+            (pb.x < -M || pb.x > W + M || pb.y < -M || pb.y > H + M)) continue;
+        // Draw the segment as the arc it is, not as a chord. Stereographic maps
+        // a great circle to a circle on the plane, and near the rim of a wide
+        // field the two part company badly -- at the all-sky end a 10 degree
+        // segment 150 degrees off axis bows far off a straight line, because
+        // the radial scale 2k tan(theta/2) is stretching hard out there.
+        //
+        // Interpolating the two POSITIONS in 3D and projecting each step
+        // follows it exactly: every point of the chord lies in the plane that
+        // A, B and the origin span, so seen from the Earth it sits on their
+        // great circle. Off the sphere the same interpolation walks the real
+        // line between two real positions, which is what a segment means there.
+        // At a normal field this costs a few thousand multiplies and changes
+        // nothing visible, which is the point.
+        const segDeg = Math.acos(Math.max(-1, Math.min(1, cosSeg))) * 180 / Math.PI;
+        const steps = Math.min(16, Math.max(1, Math.ceil(segDeg / 3)));
+        let drawing = false;
+        for (let i = 0; i <= steps; i++) {
+          const t = i / steps;
+          const p = i === 0 ? pa : i === steps ? pb : project([
+            f.a.pos[0] + (f.b.pos[0] - f.a.pos[0]) * t,
+            f.a.pos[1] + (f.b.pos[1] - f.a.pos[1]) * t,
+            f.a.pos[2] + (f.b.pos[2] - f.a.pos[2]) * t], cam);
+          if (!p) { drawing = false; continue; }  // that step is behind the camera
+          if (drawing) cx2.lineTo(p.x, p.y);
+          else { cx2.moveTo(p.x, p.y); drawing = true; }
+        }
       }
+      cx2.stroke();
     }
-    cx2.stroke();
   }
 
   // --- the circled regions, over the figure lines and under the stars
@@ -2029,7 +2047,7 @@ function showCon(abbr) {
   // An isolated figure is an explicit request for that shape and nothing
   // else, so it is drawn PAST the prominence cut rather than under it --
   // otherwise a question about Lacerta would pose itself on a blank sky.
-  if (ISOLATE) return ISOLATE.has(abbr);
+  if (ISOLATE) return ISOLATE.has(abbr) || nearCon(abbr);
   // the prominence cut sits on top of the line mode: a figure below it is
   // gone whichever mode is selected, including 'main'
   const rank = CON_RANK.get(abbr);
@@ -4357,12 +4375,24 @@ function conStars(a) { const c = CONS.get(a); return c ? c.stars : []; }
 
 // Take the rest of the sky away. Everything a question needs in one call, so
 // the generators below never touch the view's state directly.
-function isolate(abbrs) {
+function isolate(abbrs, near) {
   ISOLATE = new Set(abbrs);
   ISOLATE_STARS = new Set();
   for (const a of abbrs) for (const s of conStars(a)) ISOLATE_STARS.add(s);
+  // Second argument, and only the review passes one: a question isolates one
+  // shape and means one shape. The neighbours' stars go into the same set --
+  // the star cut asks "is this star drawn at all", and the answer is yes.
+  ISOLATE_NEAR = (near && near.length) ? new Set(near) : null;
+  if (ISOLATE_NEAR)
+    for (const a of ISOLATE_NEAR) for (const s of conStars(a)) ISOLATE_STARS.add(s);
 }
-function clearIsolate() { ISOLATE = null; ISOLATE_STARS = null; }
+function clearIsolate() { ISOLATE = null; ISOLATE_STARS = null; ISOLATE_NEAR = null; }
+// A figure that is context rather than subject. Not the same as "in
+// ISOLATE_NEAR": a group and its ring are allowed to overlap, and the board's
+// own shapes win.
+function nearCon(abbr) {
+  return !!(ISOLATE && ISOLATE_NEAR && ISOLATE_NEAR.has(abbr) && !ISOLATE.has(abbr));
+}
 
 // A question has to be able to trust what is on the screen, so anything that
 // would hide a figure star or add one is put back first. The sliders stay
@@ -5507,6 +5537,7 @@ const REVIEW = {
   specOrder: null,      // shuffled once, so the drill is not in sequence order
   offFrame: 0,          // targets pushed off the edge of the frame
   dimmed: 0,            // targets under the magnitude or Bortle cut
+  near: true,           // draw the ring of neighbouring shapes, off the frame
 };
 
 const SPEC_ORDER = ['O', 'B', 'A', 'F', 'G', 'K', 'M'];
@@ -5586,7 +5617,7 @@ function reviewPose() {
   quizSky();
   setLabels(false);
   if (REVIEW.kind === 'spectra') { clearIsolate(); return; }
-  isolate(reviewGroup().cons);
+  reviewIsolate();
   frameBoard();
 }
 
@@ -5638,6 +5669,54 @@ function frameBoard() {
       worst = Math.min(worst, s.dir[0] * c[0] + s.dir[1] * c[1] + s.dir[2] * c[2]);
   const span = 2 * Math.acos(Math.max(-1, Math.min(1, worst))) * 180 / Math.PI;
   frame(c, Math.max(40, span * BOARD_PAD + BOARD_MARGIN));
+}
+
+// ---- the ring around the board -------------------------------------------
+// A group is a teaching order, not a piece of sky, and the quiz knows nothing
+// about it: "which constellation is this?" draws its wrong answers from the
+// whole catalogue, so the shape you have to tell Cygnus APART from is often
+// one no board ever showed you. These are those shapes -- the prominent ones
+// whose stars come within a margin of the board's own reach, drawn faintly,
+// never placeable, and outside the frame the board opens at. Turn the sky and
+// they are there; sit still and the board is the board it always was.
+const REVIEW_NEAR_MAX = 8;      // more than this and the ring is just the sky
+const REVIEW_NEAR_DEG = 25;     // how far off the board's own stars one may sit
+const REVIEW_NEAR_RANK = 55;    // and how obscure it may be and still be worth
+                                // telling apart from anything
+
+function reviewNeighbours(cons) {
+  const own = new Set(cons);
+  const mine = [];
+  for (const a of cons) for (const s of conStars(a)) mine.push(s.dir);
+  if (!mine.length) return [];
+  // Measured from the board's own STARS, not from its centre. A group is a
+  // star-hop -- the Dipper group runs from the pole to Leo -- so a radius
+  // around its centroid is half the sky, and the brightest things in half the
+  // sky are Orion and Scorpius, which is not what "next to the Plough" means.
+  const cosLim = Math.cos(REVIEW_NEAR_DEG * Math.PI / 180);
+  const out = [];
+  for (const abbr of CONS.keys()) {
+    if (own.has(abbr)) continue;
+    // A ring of eight shapes nobody could name teaches nothing about telling
+    // shapes apart, so the obscure half of the sky stays out of it.
+    if ((CON_RANK.get(abbr) ?? 99) > REVIEW_NEAR_RANK) continue;
+    let best = -1;
+    for (const s of conStars(abbr))
+      for (const d of mine) {
+        const c = s.dir[0] * d[0] + s.dir[1] * d[1] + s.dir[2] * d[2];
+        if (c > best) best = c;
+      }
+    if (best >= cosLim) out.push([abbr, best]);
+  }
+  // Nearest first, so a cap of eight keeps the ones actually against the
+  // board rather than eight of the many things 25 degrees away.
+  return out.sort((a, b) => b[1] - a[1])
+            .slice(0, REVIEW_NEAR_MAX).map(x => x[0]);
+}
+
+function reviewIsolate() {
+  const g = reviewGroup();
+  isolate(g.cons, REVIEW.near ? reviewNeighbours(g.cons) : null);
 }
 
 // ---- putting a name down -------------------------------------------------
@@ -6038,6 +6117,9 @@ function renderReview() {
   if (spec && BY_CLASS.size)
     h += `<div class="segs"><button id="rhide" class="${REVIEW.specHide ? 'on' : ''}">`
       + `hide the labels</button></div>`;
+  if (!spec)
+    h += `<div class="segs"><button id="rnear" class="${REVIEW.near ? 'on' : ''}">`
+      + `neighbours</button></div>`;
   h += `</div>`;
 
   el.innerHTML = h;
@@ -6061,6 +6143,15 @@ function renderReview() {
   const ck = qel('rcheck'); if (ck) ck.onclick = checkBoard;
   const ag = qel('ragain'); if (ag) ag.onclick = () => { buildBoard(); reviewPose(); renderReview(); };
   const sw = qel('rshow'); if (sw) sw.onclick = () => { REVIEW.shown = true; renderReview(); };
+  const nb = qel('rnear');
+  // Re-isolated, not re-posed: turning the ring on and off must not take the
+  // sky back to where the board opened, because the ring is the thing you
+  // turned the sky away from the board to look at.
+  if (nb) nb.onclick = () => {
+    REVIEW.near = !REVIEW.near;
+    reviewIsolate();
+    renderReview();
+  };
   const hd = qel('rhide');
   if (hd) hd.onclick = () => {
     REVIEW.specHide = !REVIEW.specHide;
