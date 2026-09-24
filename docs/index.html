@@ -2147,10 +2147,11 @@ cv.addEventListener('pointerdown', e => {
 cv.addEventListener('pointerup', e => {
   dragging = false; cv.classList.remove('drag');
   // Coming out of a pinch, neither finger is a tap. Both lift having barely
-  // moved, so `moved < 5` is true for each -- which would open the detail
-  // panel, or put a name down on a review board, at the end of every zoom.
+  // moved, so `moved` is under the threshold for each -- which would open the
+  // detail panel, or put a name down on a review board, at the end of every
+  // zoom.
   if (PINCHED) return;
-  if (moved < 5) {                          // a click, not the end of a drag
+  if (moved < tapSlop()) {                  // a click, not the end of a drag
     // With a name picked up, a click is where that name goes. It takes the
     // click outright: opening the detail panel over a board would both name
     // the star it was asking about and cover the shape it sits in.
@@ -6573,6 +6574,25 @@ for (const ev of ['pointerup', 'pointercancel', 'pointerleave'])
 // a fingertip. The board reaches are already generous; this is the detail
 // panel's own hit test catching up.
 function touchSlop() { return mq('(pointer: coarse)').matches ? 22 : 11; }
+
+// ...and the same concession for deciding a tap was a tap at all.
+//
+// `moved` is PATH LENGTH -- every pointermove between down and up adds
+// |dx|+|dy| to it -- and the threshold was a flat 5 for a mouse and a finger
+// alike. A mouse click adds nothing to it. A fingertip is a contact patch
+// that rolls as it presses and lifts, and five pixels of accumulated wander
+// is easy to spend without moving anywhere: the tap then reads as the end of
+// a drag and the detail panel never opens.
+//
+// That is the bug where a star with a spectrum on it "does nothing" when you
+// tap it, and where tapping it again works -- it was never about the star.
+// touchSlop() already conceded that a finger needs twice a cursor's reach to
+// HIT something; this is the same concession for deciding it was a tap.
+//
+// 18 rather than 22: this is spent along a path and not across a radius, so
+// it is a looser measure of the same wander, and going much past this starts
+// eating short deliberate drags of the sky.
+function tapSlop() { return mq('(pointer: coarse)').matches ? 18 : 5; }
 
 window.addEventListener('resize', () => syncSheet(true));
 

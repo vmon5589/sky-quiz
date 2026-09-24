@@ -266,7 +266,7 @@ src += '\n;globalThis.__page = { build, resize, quizBoot, nextQuestion, answer, 
      + 'get yaw() { return yaw; }, get pitch() { return pitch; }, '
      + 'get SKY_INSET() { return SKY_INSET; }, set SKY_INSET(v) { SKY_INSET = v; }, '
      + 'visH, oy0, focalOf, touchSlop, syncSheet, unproject, camera, '
-     + 'SNAPS, SHEET_MIN, sheetMax, cycleSnap, setSheetPx, '
+     + 'SNAPS, SHEET_MIN, sheetMax, cycleSnap, setSheetPx, tapSlop, clearIsolate, '
      + 'get snapAt() { return snapAt; }, set snapAt(v) { snapAt = v; }, '
      + 'get sheetPx() { return sheetPx; }, '
      + 'get sheetDrag() { return sheetDrag; }, '
@@ -2594,8 +2594,63 @@ ok(P.QUIZ.best === 25, `best streak kept: ${P.QUIZ.best}`);
     ok(P.MARKED.size === 0, `tapping ${l} pinned an empty highlight`);
   }
 
+  // -- a finger that wanders is still a tap.
+  //
+  // `moved` is PATH LENGTH: every pointermove between down and up adds
+  // |dx|+|dy|. The threshold was a flat 5 for a mouse and a finger alike, and
+  // a mouse click spends none of it -- so five pixels of fingertip roll, which
+  // goes nowhere, read as the end of a drag and the panel never opened. That
+  // is the "tapping a star does nothing, and then the next tap works" bug,
+  // and it was never about the star.
+  //
+  // Driven through the element, because the threshold is in the handler: a
+  // test that called openPanel() directly would not see it.
+  {
+    ok(P.tapSlop() === 18, `a finger gets ${P.tapSlop()}px of wander, wanted 18`);
+    P.setMode(false);
+    if (P.QUIZ && P.QUIZ.q) P.answer(0);
+    ok(!P.quizHolds(), 'the sky is held, so no tap could open a panel anyway');
+    // Aimed at a specific bright star rather than taking whatever the last
+    // question left on screen, so this is the same tap every run.
+    const want = P.STARS().filter(s => !s.solar && s.vmag !== null)
+                   .sort((a, b) => a.vmag - b.vmag)[0];
+    // the answered question left the sky isolated, and this is about the tap
+    // rather than about what is drawn
+    P.clearIsolate();
+    P.frame(want.dir, 60); settle();
+    const target = P.proj.find(x => x.s === want);
+    ok(!!target, `${P.starName(want)} is not on the sky to tap`);
+
+    // a tap on the star, with the pointer wandering 12px of path and landing
+    // back where it started -- which is a finger, not a drag
+    const tap = (wander) => {
+      const cx = target.x + P.CVX, cy = target.y + P.CVY;
+      // shut it first: a drag leaves whatever was open alone, so a panel
+      // still up from the tap before would read as this one succeeding
+      document.getElementById('panel').classList.remove('open');
+      document.getElementById('pbody').innerHTML = '';
+      P.fire('pointerdown', { clientX: cx, clientY: cy, pointerId: 1 });
+      // one pixel of path per step, so `wander` IS the path length -- which
+      // is the quantity the threshold is measured in
+      for (let i = 0; i < wander; i++) {
+        P.fire('pointermove', { clientX: cx + (i % 2), clientY: cy });
+      }
+      P.fire('pointerup', { clientX: cx, clientY: cy, pointerId: 1 });
+      return P.panelOpen();
+    };
+
+    ok(tap(0) && P.panelOpen(), 'a perfectly still tap did not open the panel');
+    ok(tap(12), 'a tap that wandered 12px of path was read as a drag — this '
+       + 'is the bug where tapping a star does nothing');
+    ok(!tap(40), 'a real drag of 40px opened the panel, so the sky cannot be '
+       + 'turned without opening something');
+  }
+
   delete global.window.matchMedia;
   ok(P.coarse() === false, 'the pointer stayed coarse on the way out');
+  ok(P.tapSlop() === 5,
+     'a mouse kept the finger\'s allowance — a cursor does not wander, and '
+     + 'widening it there makes a short deliberate drag open the panel');
   P.clearMark();
 
   // -- and the media query, read off the stylesheet -----------------------
