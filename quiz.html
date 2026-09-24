@@ -1472,6 +1472,12 @@ function draw() {
     cx2.font = '600 12px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
     cx2.textAlign = 'center'; cx2.textBaseline = 'middle';
     cx2.fillStyle = 'rgba(125,170,230,0.55)';
+    // Worked out first, drawn second, because two names on top of each other
+    // are worth less than one of them. The star names below have always
+    // thinned themselves this way and the captions never did -- which is
+    // fine at 40 degrees, where the figures on screen are a handful, and is
+    // the wall of overlapping words a question posed at 200 turns into.
+    const caps = [];
     for (const c of CON_LABELS) {
       if (!showCon(c.abbr)) continue;
       let sx = 0, sy = 0, n = 0;
@@ -1484,7 +1490,21 @@ function draw() {
       // only caption a figure that is mostly on screen, or the name drifts
       // to the edge and labels a shape you cannot see
       if (n < Math.max(2, c.stars.length * 0.5)) continue;
-      cx2.fillText(CON_NAMES[c.abbr] || c.abbr, sx / n, sy / n);
+      caps.push({ t: CON_NAMES[c.abbr] || c.abbr, x: sx / n, y: sy / n, n });
+    }
+    // Most of the figure on screen wins the spot, so what survives a crowd is
+    // the shape there is most of to look at rather than whatever the
+    // catalogue happened to list first. The name settles ties, so a draw does
+    // not depend on catalogue order either.
+    caps.sort((a, b) => b.n - a.n || (a.t < b.t ? -1 : a.t > b.t ? 1 : 0));
+    const capBoxes = [];
+    for (const c of caps) {
+      const w = cx2.measureText(c.t).width;
+      const box = { x: c.x - w / 2 - 5, y: c.y - 9, w: w + 10, h: 18 };
+      if (capBoxes.some(b => box.x < b.x + b.w && box.x + box.w > b.x
+                          && box.y < b.y + b.h && box.y + box.h > b.y)) continue;
+      capBoxes.push(box);
+      cx2.fillText(c.t, c.x, c.y);
     }
     cx2.textAlign = 'left';
   }
@@ -4488,6 +4508,36 @@ function frameDirs(dirs, pad) {
   frame(c, Math.max(45, span * 1.4 + (pad || 20)));
 }
 
+// Four stars that fit in one field.
+//
+// frameAll() opens wide enough to hold every star it is handed, so four drawn
+// from the whole sky ask for the whole sky: the field clamps at FOV_MAX, all
+// 88 figures land on the screen together, and the four the question is about
+// are four dots somewhere in the heap. The pinned desktop baseline had
+// `nearest` posing at 340 degrees and `hottest` at 317 -- the widest the view
+// goes, both of them -- and on a handset, where the canvas is a third of the
+// height, that is not a sky, it is a page of overlapping words.
+//
+// Nothing in "which of these four is nearest" wants them scattered. The
+// options are a list of names; the sky is there to say WHICH stars those
+// names are, and four inside one cap of sky is the comparison the question is
+// actually asking for. It gives nothing away either: how far a star is and
+// how hot it is are not things neighbours share -- Betelgeuse and Rigel sit
+// in one figure at 168 and 78 parsecs, 3600 K and 12100 K.
+//
+// 30 degrees leaves about twenty candidates round any anchor, which is
+// variety enough, and poses at a median field of 77 degrees -- the same
+// order as `region` at 74 and `part` at 101.
+const GROUP_DEG = 30;
+function nearbyStars(cands, n) {
+  const a = rnd(cands);
+  const cr = Math.cos(GROUP_DEG * Math.PI / 180);
+  const near = cands.filter(s => s !== a
+    && s.dir[0] * a.dir[0] + s.dir[1] * a.dir[1] + s.dir[2] * a.dir[2] >= cr);
+  if (near.length < n - 1) return null;
+  return [a, ...shuffle(near).slice(0, n - 1)];
+}
+
 function ping(s) {
   FLASH = { ref: s, kind: 'star', label: starName(s), pos: s.pos,
             t0: performance.now() + 480 };
@@ -4707,7 +4757,15 @@ function qWhichRegion() {
         frameDirs([A.dir, ...regs.map(r => r.dir)], 30);
       },
       reveal() {
-        isolate([a, b]); setLabels(true);
+        // Every circle is filled in, not just the one that was the answer.
+        // The question drew one figure and four empty rings because finding
+        // the shape is the whole of it; the moment it has been answered that
+        // reason is spent, and four labelled figures where the four rings
+        // were is the sky the NEXT question is going to be asked about. The
+        // three that were wrong are the ones worth drawing most -- they are
+        // three constellations somebody has just placed by elimination and
+        // has not yet been shown.
+        isolate([a, ...four]); setLabels(true);
         // All four stay up, and the right one turns green. Clearing the other
         // three at the moment of the answer takes away the thing the question
         // was about: it asked WHICH of these four, and the three it was not
@@ -4723,8 +4781,16 @@ function qWhichRegion() {
       why() {
         const sep = Math.round(sepPA(A.dir, CONS.get(b).dir).sep);
         const story = CON_STORY[b] ? ` — ${CON_STORY[b]}` : '';
+        // ...and the key to the other three, in circle order, to go with the
+        // figures the reveal has just drawn in them. The sky says which shape
+        // is where; this says which NUMBER it was, and the number is the only
+        // one of the two the sky cannot show.
+        const rest = regs.map((r, i) => `${i + 1} ${conName(r.abbr)}`)
+          .filter((_, i) => i !== hit).join(' · ');
         return `<em>Circle ${hit + 1}</em>: ${esc(conName(b))}${esc(story)}, `
-          + `about ${sep}° from ${esc(conName(a))}.`;
+          + `about ${sep}° from ${esc(conName(a))}.`
+          + `<div class="d">The other three are drawn in now too — `
+          + `${esc(rest)}.</div>`;
       },
     };
   }
@@ -5036,8 +5102,10 @@ function qHottest() {
   });
   if (cands.length < 8) return null;
   for (let t = 0; t < 30; t++) {
-    const four = shuffle(cands).slice(0, 4)
-      .sort((a, b) => factsFor(b).teff_k - factsFor(a).teff_k);
+    // From one cap of sky, not from all of it -- see nearbyStars().
+    const grp = nearbyStars(cands, 4);
+    if (!grp) continue;
+    const four = grp.sort((a, b) => factsFor(b).teff_k - factsFor(a).teff_k);
     const hot = factsFor(four[0]).teff_k, next = factsFor(four[1]).teff_k;
     if (hot < next * 1.25) continue;     // a fair gap, not a coin toss
     const opts = shuffle(four);
@@ -5132,7 +5200,10 @@ function qNearest() {
                                   && s.vmag !== null && s.vmag < 4);
   if (cands.length < 8) return null;
   for (let t = 0; t < 30; t++) {
-    const four = shuffle(cands).slice(0, 4).sort((a, b) => a.dist - b.dist);
+    // From one cap of sky, not from all of it -- see nearbyStars().
+    const grp = nearbyStars(cands, 4);
+    if (!grp) continue;
+    const four = grp.sort((a, b) => a.dist - b.dist);
     if (four[0].dist > four[1].dist * 0.6) continue;
     const opts = shuffle(four);
     return {

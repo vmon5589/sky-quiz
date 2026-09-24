@@ -23,6 +23,15 @@ const noop = () => {};
 // Every string the page paints, so a rule about WHICH stars get a name can be
 // checked by reading the frame rather than by reading the code.
 const DRAWN = [];
+// ...and where it painted them. A rule about two names not landing on top of
+// each other is a rule about POSITIONS, and the text alone cannot be asked
+// about it.
+// ...and where, and in what. The font is the only thing that separates the
+// constellation captions from the star names on the way past, and nothing on
+// the page reads `font` back, so recording it changes no behaviour -- unlike
+// textAlign, which drawReviewLabels asks the context for.
+const DRAWN_AT = [];
+let FONT = '';
 // The region rims, captured by the one thing only they do: a dashed stroke.
 // That makes the cap-projection maths checkable without a browser.
 const DASHED = [];
@@ -40,7 +49,9 @@ let DASH = false;
 function ctx2d() {
   const g = { addColorStop: noop };
   return new Proxy({
-    fillText: t => { DRAWN.push(String(t)); },
+    fillText: (t, x, y) => {
+      DRAWN.push(String(t)); DRAWN_AT.push({ t: String(t), x, y, font: FONT });
+    },
     setLineDash: a => { DASH = !!(a && a.length); },
     arc: (x, y, r) => { ARCS.push([x, y, r]); },
     moveTo: (x, y) => { PATH.push(['M', x, y]); if (DASH) DASHED.push([x, y]); },
@@ -57,6 +68,7 @@ function ctx2d() {
     },
     set(t, k, v) {
       if (k === 'strokeStyle' || k === 'fillStyle') STYLES.push(String(v));
+      if (k === 'font') FONT = String(v);
       return true;
     },
   });
@@ -294,6 +306,7 @@ src += '\n;globalThis.__page = { build, resize, quizBoot, nextQuestion, answer, 
      + 'get QUIZ_DAY() { return QUIZ_DAY; }, '
      + 'SOLAR_SKY: () => SOLAR_SKY, '
      + 'get SEASON_YEAR() { return SEASON_YEAR; }, '
+     + 'GROUP_DEG, nearbyStars, clearIsolate, isolate, '
      + 'get FIGS() { return FIGS; } };\n';
 
 const vm = require('vm');
@@ -489,6 +502,169 @@ for (let t = 0; t < 250; t++) {
 }
 console.log(`whichregion: ${wrChecked} sets re-derived, answer landed on `
   + WR_HITS.map((n, i) => `${i + 1}:${n}`).join(' '));
+
+// -- and the reveal fills every circle in, not just the winning one.
+// Re-derived from the circles that are on the sky rather than read off the
+// generator: whatever constellation's centre a circle holds, that figure has
+// to be drawn by the time the answer is up. Before this, the reveal isolated
+// the anchor and the answer, so three of the four circled areas stayed empty
+// rings -- three constellations the reader had just placed by elimination
+// and was never shown.
+{
+  const drawnConStars = () => { settle(); return P.proj.map(q => q.s); };
+  let filled = 0;
+  for (let t = 0; t < 250; t++) {
+    const q = P.GENERATORS.find(g => g.kind === 'whichregion').fn();
+    if (!q) continue;
+    P.quizSky(); q.pose();
+    const anchor = abbrOf(/Only <em>([^<]+)<\/em>/.exec(q.ask)[1]);
+    // Which constellation each circle is ABOUT, off the catalogue: a circle
+    // is drawn on its figure's own centre, so the one whose centre it sits on
+    // is the one it was drawn for. Reading it back this way rather than from
+    // the generator is what makes this a check and not an echo.
+    const held = P.REGIONS.map(r => [...CONS.keys()].find(a => {
+      const d = CONS.get(a).dir;
+      return d[0] === r.dir[0] && d[1] === r.dir[1] && d[2] === r.dir[2];
+    }));
+    held.forEach((h, i) => ok(!!h,
+      `whichregion: circle ${i + 1} is not centred on any figure`));
+    ok(new Set(held).size === 4,
+       `whichregion: four circles, ${new Set(held).size} figures — ${held}`);
+    // posed, the circles are empty: only the anchor is drawn
+    ok(!!P.ISOLATE && P.ISOLATE.size === 1 && P.ISOLATE.has(anchor),
+       `whichregion: the question drew ${[...(P.ISOLATE || [])].join(',')}, `
+       + `wanted ${anchor} alone`);
+    const posedStars = new Set(drawnConStars());
+    held.forEach((h, i) => ok(!P.conStars(h).some(s => posedStars.has(s)),
+      `whichregion: circle ${i + 1} already had ${h} in it before the answer`));
+    q.reveal();
+    const iso = P.ISOLATE || new Set();
+    ok(iso.has(anchor), 'whichregion: the reveal dropped the anchor figure');
+    held.forEach((h, i) => ok(iso.has(h),
+      `whichregion: circle ${i + 1} is ${h} and the reveal left it empty — `
+      + `drew ${[...iso].sort().join(',')}`));
+    // ...and the stars reach the canvas, not just the isolate set
+    const shown = new Set(drawnConStars());
+    held.forEach((h, i) => ok(P.conStars(h).some(s => shown.has(s)),
+      `whichregion: circle ${i + 1}'s ${h} is isolated but nothing of it `
+      + 'was painted'));
+    // the answer card names the other three by their circle numbers, which is
+    // the one thing the filled-in sky still cannot say
+    const why = q.why();
+    held.forEach((h, i) => {
+      if (i === q.answer) return;
+      ok(why.includes(P.conName(h)),
+         `whichregion: the answer card does not say what circle ${i + 1} was`);
+    });
+    filled++;
+  }
+  console.log(`whichregion: ${filled} reveals filled every circle in`);
+}
+
+// -- four stars a question can actually compare.
+// `nearest` and `hottest` list four names and mark the four stars, and
+// frameAll() opens the field wide enough to hold whatever it is handed. Drawn
+// from the whole sky, that WAS the whole sky: the pinned desktop baseline had
+// the two of them posing at 340 and 317 degrees, which is the field clamped
+// as far open as it goes, every figure in the catalogue on the screen at once
+// and its caption over the next one's. On a handset, where the canvas is a
+// third of the height, nothing on it could be read.
+//
+// So the four now come out of one cap of sky, and these are the two promises
+// that makes: they are within a cap of each other, and the field the question
+// opens at is one a person can read. The camera only moves at EASY, where the
+// stars are marked -- at medium and hard finding them is the question.
+{
+  const wasLevel = P.QUIZ.level;
+  P.QUIZ.level = 'easy';
+  const FIELD_MAX = 150;
+  for (const kind of ['nearest', 'hottest']) {
+    const gen = P.GENERATORS.find(g => g.kind === kind);
+    let n = 0, widest = 0, farthest = 0;
+    for (let t = 0; t < 250; t++) {
+      const q = gen.fn();
+      if (!q) continue;
+      P.quizSky(); q.pose(); settle();
+      const four = [...P.MARKED];
+      ok(four.length === 4, `${kind}: marked ${four.length} stars, wanted 4`);
+      // within one cap of each other, off the catalogue
+      for (const a of four) for (const b of four)
+        farthest = Math.max(farthest, P.sepPA(a.dir, b.dir).sep);
+      ok(farthest <= 2 * P.GROUP_DEG + 1e-6,
+         `${kind}: the four span ${farthest.toFixed(1)} degrees, and the cap `
+         + `is ${P.GROUP_DEG} either side of the anchor`);
+      widest = Math.max(widest, P.fovDeg);
+      ok(P.fovDeg <= FIELD_MAX,
+         `${kind}: posed at ${P.fovDeg.toFixed(1)} degrees — the sky is `
+         + 'squeezed to the point of being unreadable past about ' + FIELD_MAX);
+      // and all four are ON the screen, which is what opening the field wide
+      // enough to hold them was for
+      const seen = new Map(P.proj.map(x => [x.s, x]));
+      ok(four.every(s => {
+        const x = seen.get(s);
+        return x && x.x >= 0 && x.x <= P.W() && x.y >= 0 && x.y <= P.H();
+      }), `${kind}: one of the four is off the frame the question posed`);
+      n++;
+    }
+    ok(n > 100, `${kind}: only ${n} of 250 draws produced a question`);
+    console.log(`  ${kind}: ${n} draws, four within `
+      + `${farthest.toFixed(0)} degrees, widest field ${widest.toFixed(0)}`);
+  }
+  P.QUIZ.level = wasLevel;
+}
+
+// -- and the captions thin themselves out rather than pile up.
+// Naming the shape is most of what makes it recognisable, and two names on
+// top of each other name nothing. The star labels have always dropped a name
+// that would land on one already placed; the figure captions never did, so a
+// wide field painted all 88 of them into a heap -- which is what `nearest`
+// at 340 degrees actually looked like, and what a hand-panned sky still looks
+// like without this.
+//
+// Read off the frame: the caption pass is the only thing on the page that
+// paints in 12px, and the stub measures every string at 12px wide, so the
+// boxes below are the page's own test done with the harness's own metrics.
+{
+  const wasLevel = P.QUIZ.level, wasCat = P.QUIZ.cat;
+  P.quizSky(); P.clearIsolate();
+  const captions = () => {
+    DRAWN_AT.length = 0; settle();
+    return DRAWN_AT.filter(d => /^600 12px/.test(d.font))
+      .map(d => ({ t: d.t, x: d.x - 11, y: d.y - 9, w: 22, h: 18 }));
+  };
+  const overlaps = list => {
+    const bad = [];
+    for (let i = 0; i < list.length; i++)
+      for (let j = i + 1; j < list.length; j++) {
+        const a = list[i], b = list[j];
+        if (a.x < b.x + b.w && a.x + a.w > b.x
+            && a.y < b.y + b.h && a.y + a.h > b.y) bad.push(`${a.t}/${b.t}`);
+      }
+    return bad;
+  };
+
+  let mostSeen = 0;
+  for (const fov of [40, 80, 120, 200, 340]) {
+    P.frame([1, 0, 0], fov);
+    const got = captions();
+    mostSeen = Math.max(mostSeen, got.length);
+    const bad = overlaps(got);
+    ok(bad.length === 0,
+       `captions at ${fov} degrees: ${bad.length} pairs on top of each other `
+       + `— e.g. ${bad[0]}`);
+    // every one of them is a figure this catalogue has
+    ok(got.every(c => [...CONS.keys()].some(a => P.conName(a) === c.t)),
+       `captions at ${fov} degrees: painted something that is not a figure`);
+  }
+  // ...and thinning is not the same as silence. A rule that dropped almost
+  // everything would pass the overlap check perfectly.
+  ok(mostSeen >= 12,
+     `the widest field named only ${mostSeen} figures — the captions are not `
+     + 'thinning out, they are going away');
+  console.log(`  captions: no two overlap at 40 through 340 degrees, `
+    + `${mostSeen} named at the most`);
+  P.QUIZ.level = wasLevel; P.QUIZ.cat = wasCat;
+}
 // The four options are positions, not names, so a lopsided answer is a
 // pattern to learn instead of a sky to read.
 {
