@@ -63,6 +63,19 @@ Then check it, commit `docs/` with the change, and push:
     python build_pages.py --check      # says STALE if docs/ is behind
     node test_quiz.js
 
+**After a new observing run**, the whole of it is:
+
+    python export_spectra.py     # re-freezes spectra.json and spectra_figures/
+    python build_pages.py        # bakes docs/ and docs/spectra/
+    python build_pages.py --check
+    node test_quiz.js
+
+`export_spectra.py` takes the best run per target off the pipeline's `output/`,
+so a re-reduction replaces what was published without anything else being
+said. It prints the count — worth a glance, because a frozen file drifts
+silently otherwise. `spectra_figures/` is **rewritten each time**, not merged,
+so nothing hand-placed there survives and nothing orphaned gets published.
+
 Pages redeploys within a minute of the push. Hard-refresh the page after it
 does — a plain reload will often hand you the cached `data.json`.
 
