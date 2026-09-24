@@ -5208,7 +5208,12 @@ function qNearest() {
     const opts = shuffle(four);
     return {
       kind: 'nearest', label: 'what a star is',
-      ask: 'Which of these four stars is <em>nearest to us</em>?',
+      // "nearest to Earth", not "nearest to us": `dist` is the parallax
+      // distance, which is measured from the solar system, and naming the
+      // place is worth more than the shorter phrase. `us` also reads as the
+      // reader and whoever else is in the room, which is a smaller thing than
+      // a planet and makes the question sound rhetorical.
+      ask: 'Which of these four stars is <em>nearest to Earth</em>?',
       opts: opts.map(s => ({ t: starName(s),
                           sub: withDesig(s, 'mag ' + s.vmag.toFixed(2)) })),
       answer: opts.indexOf(four[0]),
