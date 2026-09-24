@@ -22,6 +22,7 @@ import datetime
 import glob
 import json
 import os
+import re
 import sys
 
 from flask import Flask, jsonify, send_from_directory, abort
@@ -186,8 +187,13 @@ def data_json():
     # coordinates among it, which is why lat and lon stay None here.
     frozen = _load('spectra.json')
     if frozen and frozen.get('stars'):
+        # `figure` survives the freeze now and job_id does not, which is
+        # exactly the pair the page branches on: a bare slug and no job means
+        # "the copy next to the payload", and the panel asks for it
+        # relatively so it works baked and under Flask alike.
         observed = [dict(s, n_runs=1, pinned=False, contested_with=[],
-                         figure=None, job_id=None, folder=None, planet=None,
+                         figure=s.get('figure'),
+                         job_id=None, folder=None, planet=None,
                          indices=None, rms=None, rv=None, rv_err=None,
                          date_obs=None, source=None, check=None, detail=None)
                     for s in frozen['stars']]
@@ -251,6 +257,23 @@ def _observed(cat):
     return (out, obs['conflicts'],
             lats[len(lats) // 2] if lats else None,
             lons[len(lons) // 2] if lons else None)
+
+
+@app.route('/spectra/<name>')
+def frozen_figure(name):
+    """A figure out of the frozen spectra_figures/, for the panel.
+
+    The static build copies this directory next to data.json and Pages serves
+    it as a file; under Flask this is the same directory served by the same
+    relative URL, so the page has one spelling and no branch.
+
+    `name` arrives from the page, and a path is not a promise: only a bare
+    slug is answered, which is the shape export_spectra.py writes and
+    --check enforces.
+    """
+    if not re.match(r'^[a-z0-9][a-z0-9-]*\.webp$', name or ''):
+        abort(404)
+    return send_from_directory(os.path.join(APP_DIR, 'spectra_figures'), name)
 
 
 @app.route('/results/<job_id>/<path:name>')

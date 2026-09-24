@@ -71,6 +71,18 @@ LEAK_PATTERNS = (
     (r'"site_[a-z_]*":(?!null)', 'a site field with a value in it'),
 )
 
+# A published figure is a bare slug and never a path. `figure` used to be
+# refused outright, because what it held was a filename inside a run folder --
+# `Kappa_Cassiopeiae_2026-09-16-0626_8-CapObj_598654cec279` is an observation
+# date, a capture time and a job id, which are three of the things this gate
+# exists to stop. It is allowed through now only in the shape
+# export_spectra.py writes: no slash, no underscore, no run of digits that
+# could be a date. The .png sweep above still stands, so the pipeline's own
+# filename fails this twice over.
+FIG_NAME_RE = re.compile(r'^[a-z0-9][a-z0-9-]*\.webp$')
+FIG_SRC = os.path.join(APP_DIR, 'spectra_figures')
+FIG_OUT = 'spectra'
+
 
 def payload():
     """What the running app would serve at /data.json, without running it."""
@@ -98,6 +110,13 @@ def audit(d):
         for k in FORBIDDEN_STAR:
             if s.get(k) is not None:
                 bad.append(f'observed[{s.get("name")!r}].{k} = {s[k]!r}')
+        fig = s.get('figure')
+        if fig is not None and not FIG_NAME_RE.match(str(fig)):
+            bad.append(f'observed[{s.get("name")!r}].figure = {fig!r}, '
+                       f'which is not a bare slug')
+        if fig and not os.path.isfile(os.path.join(FIG_SRC, str(fig))):
+            bad.append(f'observed[{s.get("name")!r}].figure = {fig!r} '
+                       f'is named but not in spectra_figures/')
     raw = json.dumps(d, separators=(',', ':'))
     for pat, what in LEAK_PATTERNS:
         m = re.search(pat, raw)
@@ -153,10 +172,37 @@ def build():
     # nothing here for it to do and one thing it can get wrong.
     open(os.path.join(OUT_DIR, '.nojekyll'), 'w').close()
 
-    report(d, raw, html)
+    figs, figbytes = copy_figures(d)
+
+    report(d, raw, html, figs, figbytes)
 
 
-def report(d, raw, html):
+def copy_figures(d):
+    """Put the frozen figures next to the payload that names them.
+
+    Mirrored rather than merged: the destination is emptied first, so a figure
+    for a target that is no longer published cannot sit in docs/ being served
+    to anybody who guesses its name. Only files the payload actually names are
+    copied, and the audit has already proved each of those names is a bare
+    slug.
+    """
+    dest = os.path.join(OUT_DIR, FIG_OUT)
+    if os.path.isdir(dest):
+        shutil.rmtree(dest)
+    named = sorted({str(s['figure']) for s in (d.get('observed') or ())
+                    if s.get('figure')})
+    if not named:
+        return 0, 0
+    os.makedirs(dest, exist_ok=True)
+    total = 0
+    for f in named:
+        src = os.path.join(FIG_SRC, f)
+        shutil.copy2(src, os.path.join(dest, f))
+        total += os.path.getsize(src)
+    return len(named), total
+
+
+def report(d, raw, html, nfig=0, figbytes=0):
     stars = len((d.get('catalog') or {}).get('stars') or ())
     figs = len((d.get('catalog') or {}).get('figures') or
                (d.get('catalog') or {}).get('constellations') or ())
@@ -168,6 +214,13 @@ def report(d, raw, html):
     print(f'[pages] docs/data.json   {len(raw) / 1024:7.0f} KB  '
           f'({gz / 1024:.0f} KB gzipped, which is what Pages sends)')
     print(f'[pages]   {stars} stars, {figs} figures, {obs} with a spectrum')
+    if nfig:
+        # Not added to the gzipped number above on purpose: a visitor
+        # downloads data.json to see the sky, and a reduction only when they
+        # open a star. These never land on the first paint.
+        print(f'[pages] docs/{FIG_OUT}/       {figbytes / 1048576:6.1f} MB  '
+              f'({nfig} reductions, {figbytes / nfig / 1024:.0f} KB each, '
+              f'fetched one at a time when a panel opens)')
     if bodies:
         print(f'[pages]   ephemeris: {len(bodies)} bodies for {eph.get("year")} '
               f'-- right for {eph.get("year")}, and drifting after it')
@@ -214,10 +267,31 @@ def check():
         if k not in d:
             print(f'  FAIL     the payload has no {k}'); bad += 1
 
+    # Every figure the payload names is in docs/, and nothing else is. A
+    # missing one is a broken picture in the panel; a spare one is a file
+    # being published that nothing links to.
+    dest = os.path.join(OUT_DIR, FIG_OUT)
+    named = {str(s['figure']) for s in (d.get('observed') or ())
+             if s.get('figure')}
+    there = ({f for f in os.listdir(dest)} if os.path.isdir(dest) else set())
+    for f in sorted(named - there):
+        print(f'  MISSING  docs/{FIG_OUT}/{f}, and the payload names it'); bad += 1
+    for f in sorted(there - named):
+        print(f'  SPARE    docs/{FIG_OUT}/{f}, and nothing names it'); bad += 1
+    for f in sorted(named & there):
+        a = os.path.join(FIG_SRC, f)
+        b = os.path.join(dest, f)
+        if not os.path.isfile(a) or os.path.getsize(a) != os.path.getsize(b):
+            print(f'  STALE    docs/{FIG_OUT}/{f} is not spectra_figures/{f}')
+            bad += 1
+
     if not bad:
         eph = d.get('ephemeris') or {}
+        nf = len(named)
         print(f'  ok       docs/ is current: {len(raw) / 1024:.0f} KB of sky, '
-              f'planets for {eph.get("year")}, nothing that says where it was taken')
+              + (f'{nf} reductions, ' if nf else '')
+              + f'planets for {eph.get("year")}, '
+              f'nothing that says where it was taken')
     raise SystemExit(1 if bad else 0)
 
 

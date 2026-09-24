@@ -2869,6 +2869,35 @@ ok(P.QUIZ.best === 25, `best streak kept: ${P.QUIZ.best}`);
      + 'frozen spectra.json here');
   ok(!panelHTML.includes('null'),
      'the detail panel printed a null into the page');
+
+  // ...and the same star WITH a frozen figure. `figure` survives the freeze
+  // now -- as a bare slug, never a path into output/ -- and the picture sits
+  // next to data.json, so the panel has to ask for it the way it asks for
+  // data.json: relatively. A leading slash here is the same bug in the same
+  // place, and it fails the same way, silently, as a broken image on a
+  // project site.
+  star.obs = Object.assign({}, star.obs, { figure: 'kappa-cas.webp' });
+  P.openPanel(star);
+  const figHTML = document.getElementById('pbody').innerHTML;
+  ok(/<img[^>]+src="spectra\/kappa-cas\.webp"/.test(figHTML),
+     'a frozen star with a figure does not show it, or does not ask for it '
+     + `relatively — got ${(/<img[^>]*>/.exec(figHTML) || ['no <img>'])[0]}`);
+  ok(!/src="\/(spectra|results)/.test(figHTML),
+     'the panel asks for the figure absolutely, which resolves to the domain '
+     + 'root on a project site');
+  ok(!figHTML.includes('/results/'),
+     'a frozen star with a figure still reaches into /results/, which is a '
+     + 'Flask route with nothing behind it on a static host');
+
+  // and the live-installation branch is untouched: a run on disk is still the
+  // pipeline's own PNG under /results/, which is absolute and right to be.
+  star.obs = Object.assign({}, star.obs,
+                           { figure: 'stage3_colorfill.png', job_id: 'abc123' });
+  P.openPanel(star);
+  const liveHTML = document.getElementById('pbody').innerHTML;
+  ok(/<img[^>]+src="\/results\/abc123\/stage3_colorfill\.png"/.test(liveHTML),
+     'a star with a run on disk no longer shows the pipeline figure — '
+     + `got ${(/<img[^>]*>/.exec(liveHTML) || ['no <img>'])[0]}`);
   star.obs = wasObs;
 
   // 3. The date slider runs over the EPHEMERIS's year, not the browser's.

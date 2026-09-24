@@ -2,8 +2,9 @@
 
 A sky you can spin, that asks you questions about itself: name the
 constellation, place a star, say where a planet stands on a given night. 1055
-stars and 88 constellation figures, plus 46 real stellar spectra — measured
-through an SA100 grating — that the page plots itself.
+stars and 88 constellation figures, plus 65 real stellar spectra — measured
+through an SA100 grating — that the page plots itself, each one alongside the
+reduction it came out of.
 
 **Live: https://vmon5589.github.io/sky-quiz/** — nothing to install, works on a
 phone.
@@ -39,7 +40,8 @@ allowed to fetch its own data.
 | `quiz_app.py` | a small Flask server for it |
 | `sky_catalog.json` | 1055 stars and 88 figures (SIMBAD + Stellarium) |
 | `star_facts.json` | temperatures, distances, variability |
-| `spectra.json` | 46 measured spectra, curves only |
+| `spectra.json` | 65 measured spectra, curves only |
+| `spectra_figures/` | the pipeline's own figure for each, 1400px WebP |
 | `docs/` | the same quiz baked static, for Pages |
 | `test_quiz.js` | the tests — `node test_quiz.js` |
 
@@ -53,6 +55,7 @@ change to `quiz.html` on its own changes nothing anyone can see.
 |---|---|
 | `quiz.html`, `sky_catalog.json`, `star_facts.json` | `python build_pages.py` |
 | new spectra in the pipeline | `python export_spectra.py`, then `python build_pages.py` |
+| a reduction was re-run | the same two — the figures are re-encoded from `output/` each time |
 | the year turned over | `python build_pages.py` — the planets are baked for one year, and the page says which |
 
 Then check it, commit `docs/` with the change, and push:
@@ -69,3 +72,15 @@ does — a plain reload will often hand you the cached `data.json`.
 filenames, dates or observing locations. Set `SPECTRA_DIR` to a checkout of the
 spectrum pipeline these came from and the page reads that installation live
 instead, which adds the click-through to each reduction.
+
+`spectra_figures/` is the pipeline's own stage-3 figure for each star —
+wavelength-coloured fill, the line set, and the dispersed frame it was
+extracted from as a strip along the top. They are re-encoded on export (1400px
+WebP, ~43 KB each, 2.7 MB for all 65) and **renamed off the star**, because a
+run folder is an observation date, a capture time and a job id. The build
+refuses a `figure` that is not a bare slug.
+
+The two plots in the detail panel are different quantities and each says so:
+the page's own is continuum-normalised, where a line's depth is the star; the
+reduction under it is raw counts, where much of the envelope is the
+instrument.

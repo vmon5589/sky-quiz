@@ -3151,8 +3151,14 @@ function openPanel(s) {
   const ls = pkey ? planetLinesSentence(pkey) : linesSentence(o.sptype || s.sp);
   if (ls) h += `<p class="lines">${ls}</p>`;
   h += `<canvas id="spec" width="760" height="300"></canvas>`;
-  h += `<p class="caption">normalised flux, ${o.spectrum ?
-        o.spectrum.wave.length + ' points' : 'unavailable'}</p>`;
+  // Both plots say which quantity they are, because the panel now shows two
+  // spectra of one star and they are not the same measurement. This one is
+  // continuum-normalised -- the instrument's own response divided out, so a
+  // line's DEPTH is a fact about the star and two stars can be compared at
+  // all. The reduction below is raw counts, where most of the hump is the
+  // detector and the grating. Unlabelled, they read as one plot drawn twice.
+  h += `<p class="caption">continuum-normalised flux${o.spectrum ?
+        ' · ' + o.spectrum.wave.length + ' points' : ' · unavailable'}</p>`;
 
   const chk = o.check === 'ok' ? 'ok' : (o.check === 'warn' ? 'warn' : 'none');
   h += `<p class="caption" style="margin-top:14px"><b>This run</b> — measured
@@ -3180,7 +3186,24 @@ function openPanel(s) {
 
   if (o.detail) h += `<p class="caption">${esc(o.detail)}</p>`;
   if (o.figure) {
-    h += `<img src="/results/${encodeURIComponent(o.job_id)}/${o.figure}" alt="spectrum figure">`;
+    // A figure arrives from one of two places and the panel does not care
+    // which. A live installation has the pipeline behind it, so the figure is
+    // the run's own PNG under /results/ -- a Flask route, absolute, and right
+    // to be. A frozen build has no pipeline: `figure` is then a bare slug and
+    // the picture sits next to data.json, so it is asked for RELATIVELY for
+    // the same reason data.json is -- a leading slash resolves to the domain
+    // root on a project site and 404s silently.
+    //
+    // Lazy, because this is 43 KB that only matters once somebody has opened
+    // a panel, and the sky should never wait on it.
+    const src = o.job_id
+      ? `/results/${encodeURIComponent(o.job_id)}/${encodeURIComponent(o.figure)}`
+      : `spectra/${encodeURIComponent(o.figure)}`;
+    h += `<img src="${esc(src)}" alt="the reduction for this star" loading="lazy">`;
+    h += `<p class="caption">raw counts, as reduced — the pipeline's own `
+       + `figure. The envelope is the instrument's response as much as the `
+       + `star's; the strip along the top is the dispersed frame it was `
+       + `extracted from.</p>`;
   }
   // Only where there is a run on disk to open. A frozen spectra.json carries
   // the curves and nothing else -- no job, no folder -- so job_id is null and
