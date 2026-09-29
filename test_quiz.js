@@ -307,7 +307,10 @@ src += '\n;globalThis.__page = { build, resize, quizBoot, nextQuestion, answer, 
      + 'SOLAR_SKY: () => SOLAR_SKY, '
      + 'get SEASON_YEAR() { return SEASON_YEAR; }, '
      + 'GROUP_DEG, nearbyStars, clearIsolate, isolate, '
-     + 'get FIGS() { return FIGS; } };\n';
+     + 'get FIGS() { return FIGS; }, '
+     + 'mapCarry, mapCentre, mapPieceAt, mapGrab, mapMove, mapDrop, mapTick, mapOn, '
+     + 'mapShow, mapContext, MAP_GROUPS, MAP_EDGE, MAP_SNAP_DEG, get MAP_DRAWN() { return MAP_DRAWN; }, '
+     + 'REV_WRONG, REV_RIGHT, get back() { return back; }, set back2(v) { back = v; } };\n';
 
 const vm = require('vm');
 vm.runInThisContext(src, { filename: 'quiz.html<script>' });
@@ -1863,6 +1866,294 @@ ok(P.QUIZ.best === 25, `best streak kept: ${P.QUIZ.best}`);
 
 
 
+
+
+// ============================================ the star map
+// The map is the same group dealt into its own places on a black table, with
+// the other groups laid out around it where they really are. It is wrong
+// rather than broken in its own ways: a shape that starts at home, a drop that
+// loses a piece or duplicates one, a name on a piece before the check, a
+// piece that cannot be picked up, an edge that turns the sky the wrong way.
+// Every one of those is played through the page's own pointer handlers.
+{
+  const R = P.REVIEW;
+  const wasOn = R.on, wasKind = R.kind, wasGroup = R.group, wasMap = R.mapGroup;
+  const mouse = (x, y) => ({ pointerId: 7, pointerType: 'mouse',
+    clientX: x + P.CVX, clientY: y + P.CVY, preventDefault() {} });
+  const touch = (id, x, y) => ({ pointerId: id, pointerType: 'touch',
+    clientX: x + P.CVX, clientY: y + P.CVY, preventDefault() {} });
+  const deg = (a, b) => Math.acos(Math.max(-1, Math.min(1,
+    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]))) * 180 / Math.PI;
+  const drawnOf = key => P.MAP_DRAWN.find(d => d.key === key);
+  const mid = hl => ({ x: hl.reduce((a, p) => a + p.x, 0) / hl.length,
+                       y: hl.reduce((a, p) => a + p.y, 0) / hl.length });
+  // somewhere on the piece that picks THIS piece, not one lying over it
+  const gripOf = key => {
+    const d = drawnOf(key);
+    if (!d) return null;
+    const c = mid(d.hull);
+    const tries = [c, ...d.hull.map(p => ({ x: (p.x + c.x) / 2, y: (p.y + c.y) / 2 })), ...d.hull];
+    return tries.find(q => P.mapPieceAt(q.x, q.y) === key) || null;
+  };
+  P.setMode(true);
+
+  // -- carrying a shape: rigid, upright, and exact at both ends
+  {
+    R.mapGroup = 0; R.kind = 'map'; P.buildBoard();
+    const t = R.targets[0];
+    const stars = t.stars;
+    const same = P.mapCarry(t.dir, t.dir, stars[0].dir);
+    ok(deg(same, stars[0].dir) < 1e-6, 'carrying a shape to its own place moved it');
+    for (const to of R.targets.slice(1).map(x => x.dir)) {
+      ok(deg(P.mapCarry(t.dir, to, t.dir), to) < 1e-6,
+         `the centre of ${t.label} did not land on the slot it was carried to`);
+      let worst = 0;
+      for (let i = 0; i < stars.length; i++)
+        for (let j = i + 1; j < stars.length; j++) {
+          const a = P.mapCarry(t.dir, to, stars[i].dir), b = P.mapCarry(t.dir, to, stars[j].dir);
+          worst = Math.max(worst, Math.abs(deg(a, b) - deg(stars[i].dir, stars[j].dir)));
+        }
+      ok(worst < 1e-6, `${t.label} changed shape on the way: ${worst.toFixed(6)} deg`);
+    }
+    // along its own parallel a piece only turns about the pole, so every star
+    // keeps its declination -- which is what "stays upright" means
+    const ra = Math.atan2(t.dir[1], t.dir[0]) + 1.3;
+    const cd = Math.hypot(t.dir[0], t.dir[1]);
+    const along = [cd * Math.cos(ra), cd * Math.sin(ra), t.dir[2]];
+    ok(stars.every(st => Math.abs(P.mapCarry(t.dir, along, st.dir)[2] - st.dir[2]) < 1e-9),
+       `${t.label} tipped over when carried along its own parallel`);
+  }
+
+  // -- a pair is both its groups, whole, and the context is the other pair
+  for (let g = 0; g < P.MAP_GROUPS.length; g++) {
+    R.mapGroup = g; R.kind = 'map'; P.buildBoard();
+    const M = P.MAP_GROUPS[g];
+    const want = M.groups.flatMap(id => P.REVIEW_GROUPS.find(x => x.id === id).cons);
+    const cons = new Set(R.targets.map(t => t.con));
+    ok(want.every(a => cons.has(a)) && cons.size === want.length,
+       `${M.id}: the map dealt ${[...cons].join(',')}, wanted ${want.join(',')}`);
+    const ctx = P.mapContext();
+    ok(ctx.other.length > 0 && !ctx.other.some(a => cons.has(a)),
+       `${M.id}: the faint context is ${ctx.other.join(',')}`);
+  }
+  // and every one of the four groups is in exactly one pair
+  const paired = P.MAP_GROUPS.flatMap(m => m.groups).sort();
+  ok(paired.join() === P.REVIEW_GROUPS.map(g => g.id).sort().join(),
+     `the pairs cover ${paired.join(',')}`);
+
+  // -- every pair: dealt, drawn, and played to a clean sweep by hand
+  let played = 0, drags = 0;
+  for (let g = 0; g < P.MAP_GROUPS.length; g++) {
+    const G = P.MAP_GROUPS[g];
+    R.mapGroup = g; R.kind = 'map';
+    P.buildBoard(); P.reviewPose();
+    DRAWN.length = 0; settle();
+    const ts = R.targets, keys = ts.map(t => t.key);
+    const tag = `${G.id}/map`;
+    ok(P.mapOn(), `${tag}: the map is not on`);
+    ok(ts.length >= 4, `${tag}: only ${ts.length} pieces`);
+    ok([...R.place.values()].sort().join() === keys.slice().sort().join(),
+       `${tag}: the deal is not one piece per place`);
+    ok(keys.every(k => R.place.get(k) !== k),
+       `${tag}: ${keys.filter(k => R.place.get(k) === k).join(',')} dealt at home`);
+    ok(P.proj.length === 0, `${tag}: the ordinary sky drew ${P.proj.length} stars under the map`);
+    const names = new Set([...ts.map(t => t.label), ...Object.values(P.CON_NAMES)]);
+    ok(!DRAWN.some(x => names.has(x)),
+       `${tag}: a name is on the table before the check — ${DRAWN.filter(x => names.has(x)).join(', ')}`);
+    ok(P.MAP_DRAWN.length === ts.length, `${tag}: ${P.MAP_DRAWN.length} of ${ts.length} pieces drawn`);
+    const onScreen = P.MAP_DRAWN.filter(d => d.hull.some(p =>
+      p.x > 0 && p.x < P.W() && p.y > 0 && p.y < P.H())).length;
+    ok(onScreen === ts.length, `${tag}: ${ts.length - onScreen} piece(s) open off screen`);
+
+    // Put each piece home by DRAGGING it: down on the piece, up at the same
+    // offset from where its home slot is drawn. The slot is found by the
+    // piece currently sitting in it, which is on screen by the check above.
+    for (let pass = 0; pass < 2; pass++)
+      for (const t of ts) {
+        if (R.place.get(t.key) === t.key) continue;
+        const grip = gripOf(t.key);
+        const sitter = R.place.get(t.key);
+        const there = drawnOf(sitter), here = drawnOf(t.key);
+        if (!grip || !there || !here) continue;
+        const a = mid(here.hull), b = mid(there.hull);
+        P.fire('pointerdown', mouse(grip.x, grip.y));
+        ok(R.hold && R.hold.key === t.key, `${tag}: a press on ${t.label} did not pick it up`);
+        ok(!P.dragging, `${tag}: picking up ${t.label} also turned the sky`);
+        P.fire('pointermove', mouse(grip.x + (b.x - a.x) / 2, grip.y + (b.y - a.y) / 2));
+        P.fire('pointermove', mouse(grip.x + b.x - a.x, grip.y + b.y - a.y));
+        P.fire('pointerup', mouse(grip.x + b.x - a.x, grip.y + b.y - a.y));
+        drags++;
+        ok(!R.hold, `${tag}: ${t.label} is still held after letting go`);
+        settle();
+      }
+    ok([...R.place.values()].sort().join() === keys.slice().sort().join(),
+       `${tag}: swapping lost or doubled a piece`);
+    ok(P.reviewScore() === ts.length,
+       `${tag}: dragged every piece home and scored ${P.reviewScore()}/${ts.length}`);
+    DRAWN.length = 0; STYLES.length = 0;
+    P.checkBoard(); settle();
+    ok(ts.every(t => DRAWN.filter(x => x === t.label).length === 1),
+       `${tag}: after the check the pieces are not each named once — ${DRAWN.join(', ')}`);
+    ok(!STYLES.some(c => String(c).toLowerCase() === P.REV_WRONG),
+       `${tag}: a clean sweep painted something red`);
+    // and a checked board is not a board any more: a press turns the sky
+    const g0 = gripOf(ts[0].key);
+    if (g0) {
+      P.fire('pointerdown', mouse(g0.x, g0.y));
+      ok(!R.hold && P.dragging, `${tag}: a checked piece could still be picked up`);
+      P.fire('pointerup', mouse(g0.x, g0.y));
+    }
+    played++;
+  }
+
+  // -- a swap is a swap, and a drop on empty black is not a drop
+  {
+    R.mapGroup = 1; R.kind = 'map'; P.buildBoard(); P.reviewPose(); settle();
+    const before = new Map(R.place);
+    const [s1, s2] = R.targets.map(t => t.key);
+    const A = R.place.get(s1), B = R.place.get(s2);
+    ok(P.mapGrab(...Object.values(gripOf(A))), 'could not pick a piece up to swap');
+    R.hold.dir = R.targets[1].dir;            // over the second slot
+    P.mapDrop();
+    ok(R.place.get(s2) === A && R.place.get(s1) === B,
+       `dropping onto a slot did not swap: ${s1}=${R.place.get(s1)} ${s2}=${R.place.get(s2)}`);
+    ok(R.targets.slice(2).every(t => R.place.get(t.key) === before.get(t.key)),
+       'a swap moved a third piece');
+    const mid2 = new Map(R.place);
+    P.mapGrab(...Object.values(gripOf(A)));
+    R.hold.dir = R.targets[1].dir.map(v => -v);   // the far side of the sky
+    P.mapDrop();
+    ok([...R.place].every(([k, v]) => mid2.get(k) === v),
+       'a piece dropped on empty black was put somewhere');
+    settle();
+    ok(deg(P.mapCentre(A, performance.now()), R.targets[1].dir) < 1e-4,
+       'a piece dropped on empty black did not go back to its slot');
+  }
+
+  // -- the edge turns the sky under a held piece, and nowhere else does
+  {
+    R.mapGroup = 0; R.kind = 'map'; P.buildBoard(); P.reviewPose(); settle();
+    const k = R.targets[0].key;
+    const hold = x => {
+      const g = gripOf(k);
+      P.mapGrab(g.x, g.y); P.mapMove(x, P.visH() / 3);
+    };
+    const tick = () => { const t = performance.now(); P.mapTick(t); P.mapTick(t + 16); };
+    const turned = x => {
+      hold(x); const y0 = P.yaw, d0 = R.hold.dir;
+      tick();
+      const out = { dy: P.yaw - y0, moved: deg(d0, R.hold.dir) };
+      P.fire('pointercancel', {}); settle();
+      return out;
+    };
+    const L = turned(3), Rt = turned(P.W() - 3), M = turned(P.W() / 2);
+    ok(L.dy > 0, `holding at the left edge turned the sky ${L.dy} (wanted it to bring the left in)`);
+    ok(Rt.dy < 0, `holding at the right edge turned the sky ${Rt.dy}`);
+    ok(M.dy === 0, `holding mid-sky turned the sky ${M.dy}`);
+    ok(L.moved > 0.01, 'the sky turned and the held piece stayed behind');
+    const y0 = P.yaw; P.mapTick(performance.now()); P.mapTick(performance.now() + 16);
+    ok(P.yaw === y0, 'with nothing held the edge still turns the sky');
+    ok(P.MAP_EDGE() === 40, `a mouse gets a ${P.MAP_EDGE()}px edge`);
+  }
+
+  // -- a finger on the black turns the sky and leaves the pieces alone; a
+  // second finger puts a held piece back rather than dropping it
+  {
+    R.mapGroup = 0; R.kind = 'map'; P.buildBoard(); P.reviewPose(); settle();
+    let blank = null;
+    for (let y = 20; y < P.H() && !blank; y += 37)
+      for (let x = 20; x < P.W() && !blank; x += 41)
+        if (!P.mapPieceAt(x, y)) blank = { x, y };
+    const before = new Map(R.place), y0 = P.yaw;
+    P.fire('pointerdown', mouse(blank.x, blank.y));
+    P.fire('pointermove', mouse(blank.x + 60, blank.y));
+    P.fire('pointerup', mouse(blank.x + 60, blank.y));
+    ok(P.yaw !== y0 && !R.hold, 'dragging the black between pieces did not turn the sky');
+    ok([...R.place].every(([k, v]) => before.get(k) === v), 'turning the sky moved a piece');
+    settle();
+    P.TOUCHES.clear();
+    const k = R.place.get(R.targets[0].key), g = gripOf(k);
+    P.fire('pointerdown', touch(1, g.x, g.y));
+    ok(R.hold && R.hold.key === k, 'a finger on a piece did not pick it up');
+    P.fire('pointermove', touch(1, g.x + 80, g.y + 20));
+    P.fire('pointerdown', touch(2, g.x + 200, g.y + 200));
+    ok(!R.hold, 'a second finger left the piece in the first one');
+    P.fire('pointerup', touch(1, g.x + 80, g.y + 20));
+    P.fire('pointerup', touch(2, g.x + 200, g.y + 200));
+    ok([...R.place].every(([kk, v]) => before.get(kk) === v), 'a pinch dropped a piece');
+    P.TOUCHES.clear(); P.dragging = false;
+  }
+
+  // -- "show me": every piece glides home, the answer is left as it was, and
+  // each is named once in the truth colour where it was wrong
+  {
+    R.mapGroup = 1; R.kind = 'map'; P.buildBoard(); P.reviewPose(); settle();
+    const answer = new Map(R.place);
+    P.checkBoard(); P.mapShow(); R.shown = true;
+    P.draw();
+    ok(R.targets.some(t => deg(P.mapCentre(t.key, performance.now()), t.dir) > 0.5),
+       '"show me" jumped the pieces home rather than gliding them');
+    DRAWN.length = 0; STYLES.length = 0; settle();
+    ok(R.targets.every(t => deg(P.mapCentre(t.key, performance.now()), t.dir) < 1e-4),
+       '"show me" left a piece away from home');
+    ok([...R.place].every(([k, v]) => answer.get(k) === v), '"show me" rewrote the answer');
+    ok(P.reviewScore() === 0, `the dealt board scored ${P.reviewScore()}`);
+    ok(R.targets.every(t => DRAWN.filter(x => x === t.label).length === 1),
+       '"show me" did not name every piece exactly once');
+    ok(!STYLES.some(c => String(c).toLowerCase() === P.REV_WRONG),
+       '"show me" left red on the table');
+    ok(/you put/.test(P.reviewHTML()), 'the checked map lists no misses');
+  }
+
+  // -- keys: no tray to pick from, Enter checks and then deals again
+  {
+    const key = k => (global.__listeners.keydown || [])
+      .forEach(fn => fn({ key: k, target: { tagName: 'BODY' }, preventDefault() {} }));
+    R.mapGroup = 0; R.kind = 'map'; P.buildBoard(); P.reviewPose(); settle();
+    key('2');
+    ok(R.sel === null, 'a number key picked up a piece on the map');
+    key('Enter');
+    ok(R.checked, 'Enter did not check the map');
+    key('Enter');
+    ok(!R.checked && R.targets.every(t => R.place.get(t.key) !== t.key),
+       'Enter on a checked map did not deal it again');
+  }
+
+  // -- stepped back, a piece would slide away from the finger holding it
+  {
+    P.back2 = 0.4;
+    R.kind = 'map'; P.buildBoard(); P.reviewPose();
+    ok(P.back === 0, 'the map posed with the camera stepped back off the sphere');
+  }
+
+  // -- with a phone's sheet up, every piece opens above it
+  {
+    const was = P.SKY_INSET, INSET = Math.round(P.H() * 0.52);
+    P.SKY_INSET = INSET;
+    for (let g = 0; g < P.MAP_GROUPS.length; g++) {
+      R.mapGroup = g; R.kind = 'map'; P.buildBoard(); P.reviewPose(); settle();
+      const under = P.MAP_DRAWN.filter(d => !d.hull.some(p => p.y < P.H() - INSET && p.y > 0
+                                                           && p.x > 0 && p.x < P.W()));
+      ok(under.length === 0,
+         `${P.MAP_GROUPS[g].id}/map: ${under.length} piece(s) open under the sheet`);
+    }
+    P.SKY_INSET = was;
+  }
+
+  // -- away and back: the quiz draws the ordinary sky, the map comes back as the map
+  {
+    R.mapGroup = 1; R.kind = 'map'; P.buildBoard(); P.reviewPose(); settle();
+    P.setMode(false); settle();
+    ok(!P.mapOn() && P.proj.length > 0, 'the quiz is still drawing the map');
+    P.setMode(true); settle();
+    ok(P.mapOn() && P.proj.length === 0, 'review came back without its map');
+  }
+
+  R.group = wasGroup; R.kind = wasKind; R.mapGroup = wasMap;
+  P.buildBoard(); P.setMode(wasOn); settle();
+  console.log(`  map: ${played} pairs dealt and dragged home by hand in ${drags} drags; `
+    + 'swaps, the edge, a pinch and "show me" played through');
+}
 
 // ============================================ two fingers on the glass
 // A pinch that also drags is the failure this file exists to stop coming

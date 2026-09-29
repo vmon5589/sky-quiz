@@ -1247,6 +1247,10 @@ function draw() {
   cx2.fillStyle = skyGlow(bortle);
   cx2.fillRect(0, 0, W, H);
 
+  // The star map is a black table with the pieces on it, not a sky, so it
+  // takes the whole frame. See drawMap().
+  if (mapOn()) { proj = []; drawMap(cam, now); return; }
+
   // --- constellation figures, behind the stars
   const at = new Map();
   for (const s of STARS) {
@@ -1772,7 +1776,7 @@ function hexA(hex, a) {
 }
 
 // the observed stars pulse, so the scene animates even when nothing is touched
-function loop() { glide(); draw(); requestAnimationFrame(loop); }
+function loop() { glide(); mapTick(); draw(); requestAnimationFrame(loop); }
 
 // ============================================================ data
 function build(d) {
@@ -2140,12 +2144,20 @@ let dragging = false, lx = 0, ly = 0, moved = 0;
 // that was wrong.
 cv.addEventListener('pointerdown', e => {
   if (TOUCHES.size >= 2) { dragging = false; return; }
+  // On the star map a finger on a piece picks the piece up, and a finger on
+  // the black between them turns the sky as it always has.
+  if (mapGrab(ex(e), ey(e))) {
+    dragging = false; moved = 0; vx = vy = 0; TWEEN = null;
+    cv.classList.add('drag'); cv.setPointerCapture(e.pointerId);
+    return;
+  }
   dragging = true; moved = 0; lx = e.clientX; ly = e.clientY; vx = vy = 0;
   TWEEN = null;                          // taking the wheel cancels the turn
   cv.classList.add('drag'); cv.setPointerCapture(e.pointerId);
 });
 cv.addEventListener('pointerup', e => {
   dragging = false; cv.classList.remove('drag');
+  if (REVIEW.hold) { mapDrop(); return; }
   // Coming out of a pinch, neither finger is a tap. Both lift having barely
   // moved, so `moved` is under the threshold for each -- which would open the
   // detail panel, or put a name down on a review board, at the end of every
@@ -2164,6 +2176,8 @@ cv.addEventListener('pointerup', e => {
 });
 cv.addEventListener('pointermove', e => {
   if (TOUCHES.size >= 2) return;        // a pinch, and the pinch handler has it
+  if (REVIEW.hold) { mapMove(ex(e), ey(e)); return; }
+  if (mapOn()) cv.style.cursor = !REVIEW.checked && mapPieceAt(ex(e), ey(e)) ? 'move' : '';
   if (dragging) {
     const dx = e.clientX - lx, dy = e.clientY - ly;
     moved += Math.abs(dx) + Math.abs(dy);
@@ -2183,6 +2197,8 @@ cv.addEventListener('pointermove', e => {
   showTip(hit.s, e.clientX, e.clientY);
 });
 cv.addEventListener('pointerleave', () => { tip.style.display = 'none'; hoverStar = null; });
+// A piece the browser took away mid-drag goes back where it came from.
+cv.addEventListener('pointercancel', () => { mapCancel(); dragging = false; });
 // A wheel event is not a click. A mouse notch arrives as one event of about
 // 100px, but a trackpad flick arrives as thirty or forty small ones -- so
 // treating every event as a fixed 1.08x step zoomed by 1.08^35, which is the
@@ -5597,7 +5613,7 @@ function conTargets(abbr) {
       const c = want && comps.find(k => k.includes(want));
       if (!c || used.has(c)) continue;
       used.add(c);
-      out.push(withDir({ key: part.key, label: part.label, stars: c }));
+      out.push(withDir({ key: part.key, label: part.label, stars: c, con: abbr }));
     }
     // Only when the figure really did come apart the way the rule describes.
     // A catalogue that draws the serpent as one unbroken run gets one
@@ -5605,7 +5621,7 @@ function conTargets(abbr) {
     if (out.length === rule.length) return out;
   }
   const stars = conStars(abbr);
-  return stars.length ? [withDir({ key: abbr, label: conName(abbr), stars })] : [];
+  return stars.length ? [withDir({ key: abbr, label: conName(abbr), stars, con: abbr })] : [];
 }
 
 // A board of more than about a dozen names stops being a review and becomes
@@ -5618,11 +5634,13 @@ const REVIEW_KINDS = [
   { id: 'shapes', label: 'shapes' },
   { id: 'stars', label: 'star names' },
   { id: 'spectra', label: 'spectra' },
+  { id: 'map', label: 'star map' },
 ];
 
 const REVIEW = {
   on: false,
   group: 0,
+  mapGroup: 0,          // the star map's own: an index into MAP_GROUPS
   kind: 'shapes',
   targets: [],          // {key, label, stars, dir, star?}
   chips: [],            // the same keys, shuffled: the tray's order
@@ -5638,11 +5656,36 @@ const REVIEW = {
   offFrame: 0,          // targets pushed off the edge of the frame
   dimmed: 0,            // targets under the magnitude or Bortle cut
   near: true,           // draw the ring of neighbouring shapes, off the frame
+  // the star map's own: see "the star map" below
+  anim: new Map(),      // piece key -> {from, to, t0}: a glide into a slot
+  hold: null,           // {key, x, y, dir}: the piece under a finger
+  order: [],            // piece keys, bottom to top: the last one touched on top
 };
 
 const SPEC_ORDER = ['O', 'B', 'A', 'F', 'G', 'K', 'M'];
 
-function reviewGroup() { return REVIEW_GROUPS[REVIEW.group] || REVIEW_GROUPS[0]; }
+// The map is played in PAIRS of groups rather than one at a time. One group
+// at a time is how a group is learnt, and it is also what leaves each one an
+// island: the whole reason for the map is the sky between them. Each pair is
+// two groups that really do run into each other -- Bootes and Corona Borealis
+// into Serpens and Lyra, Perseus and Aries into Taurus -- so a pair is one
+// continuous stretch of sky, and the other pair is laid out around it.
+const MAP_GROUPS = [
+  { id: 'dipper+cygnus', label: 'Big Dipper + Cygnus', groups: ['dipper', 'cygnus'] },
+  { id: 'cas+orion', label: 'Cassiopeia + Orion', groups: ['cas', 'orion'] },
+];
+const MAP_GROUP_CACHE = new Map();
+function mapGroup() {
+  const m = MAP_GROUPS[REVIEW.mapGroup] || MAP_GROUPS[0];
+  if (!MAP_GROUP_CACHE.has(m.id))
+    MAP_GROUP_CACHE.set(m.id, { id: m.id, label: m.label,
+      cons: m.groups.flatMap(id => REVIEW_GROUPS.find(g => g.id === id).cons) });
+  return MAP_GROUP_CACHE.get(m.id);
+}
+function reviewGroup() {
+  if (REVIEW.kind === 'map') return mapGroup();
+  return REVIEW_GROUPS[REVIEW.group] || REVIEW_GROUPS[0];
+}
 function reviewTarget(key) { return REVIEW.targets.find(t => t.key === key); }
 function reviewLabel(key) { const t = reviewTarget(key); return t ? t.label : key; }
 // The designation under a name, on a star board. A shape has none, and a
@@ -5683,6 +5726,9 @@ function buildBoard() {
     for (const a of g.cons) ts.push(...conTargets(a));
   }
   REVIEW.targets = ts;
+  REVIEW.anim = new Map(); REVIEW.hold = null;
+  REVIEW.order = ts.map(t => t.key);
+  if (REVIEW.kind === 'map') { dealMap(); return; }
   // Shuffled, and shuffled ONCE: a tray listed in the order the targets were
   // built is a tray listed west to east, which answers the board.
   REVIEW.chips = shuffle(ts.map(t => t.key));
@@ -5717,6 +5763,13 @@ function reviewPose() {
   quizSky();
   setLabels(false);
   if (REVIEW.kind === 'spectra') { clearIsolate(); return; }
+  // A piece is dragged by unprojecting the finger, and unproject() is the
+  // view from the Earth. Stepped back, the sky under a finger and the sky
+  // drawn there part company, and a piece would slide away from the hand
+  // holding it.
+  if (REVIEW.kind === 'map' && back) {
+    back = 0; setSlider('back', 0); qel('backv').textContent = '0';
+  }
   reviewIsolate();
   frameBoard();
 }
@@ -6087,6 +6140,389 @@ function paintLadder(el) {
   });
 }
 
+// ---- the star map ----------------------------------------------------------
+// The other boards pose one group and nothing else, which is how a group is
+// learnt and also why the groups never meet: Leo is a board, Gemini is
+// another, and the sky between them -- the one that is actually overhead --
+// is on neither. The map is the same group on a black table with every OTHER
+// group laid out around it where it really is, and the group's own shapes
+// dealt into each other's places. Drag a shape onto another and the two swap;
+// hold one at the edge and the sky turns under it, the way a planisphere's
+// disc does, and it can be stopped anywhere.
+//
+// A place is a SLOT, not a point. Every shape sits in exactly one of the
+// group's own slots at all times, so a drop snaps and the grade is exact --
+// there is no "close enough" to tune. REVIEW.place is slot key -> the piece
+// sitting in it, which is the same shape the other boards keep, so the score,
+// the check and the list of misses are theirs unchanged.
+const MAP_BG = '#030406';        // a black table, not a night sky
+const MAP_PAD = 13;              // how far the piece's card reaches past its stars
+const MAP_SNAP_DEG = 28;         // dropped further than this from any slot, it goes back
+const MAP_GLIDE_MS = 420;
+const MAP_EDGE = () => (coarse() ? 56 : 40);   // the strip at each side that turns the sky
+const MAP_TURN = 420;            // px of sky per second, at the very edge
+
+function mapOn() { return REVIEW.on && REVIEW.kind === 'map' && REVIEW.targets.length > 0; }
+
+// Shuffled so that nothing starts at home. A shape already in its place on a
+// board of five is a fifth of the answer handed over, and it is the one piece
+// nobody would think to move.
+function dealMap() {
+  const keys = REVIEW.targets.map(t => t.key);
+  let perm = keys;
+  for (let i = 0; i < 50 && keys.length > 1; i++) {
+    perm = shuffle(keys);
+    if (perm.every((k, j) => k !== keys[j])) break;
+  }
+  REVIEW.place = new Map(keys.map((k, j) => [k, perm[j]]));
+  REVIEW.chips = keys.slice();
+  REVIEW.sel = null;
+  REVIEW.checked = false;
+  REVIEW.shown = false;
+  REVIEW.offFrame = REVIEW.dimmed = 0;
+}
+
+// Carry a shape from its own place to another, the way a star map would: turn
+// it about the pole by the difference in RA, then slide it along that
+// meridian by the difference in declination. The piece stays upright -- its
+// north still points at the pole -- which a single shortest rotation would
+// not do: moved east along a parallel, that tips a shape over by as much as
+// the parallel curves.
+const dot3 = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+function mapCarry(home, to, v) {
+  const raH = Math.atan2(home[1], home[0]), raT = Math.atan2(to[1], to[0]);
+  const decH = Math.asin(Math.max(-1, Math.min(1, home[2])));
+  const decT = Math.asin(Math.max(-1, Math.min(1, to[2])));
+  const a = raT - raH, ca = Math.cos(a), sa = Math.sin(a);
+  const w = [v[0] * ca - v[1] * sa, v[0] * sa + v[1] * ca, v[2]];
+  // Rodrigues about m x z, where m is the meridian's own direction on the
+  // equator: a positive turn about it carries m straight up toward the pole.
+  const k = [Math.sin(raT), -Math.cos(raT), 0];
+  const th = decT - decH, ct = Math.cos(th), st = Math.sin(th);
+  const kw = dot3(k, w);
+  const kx = [k[1] * w[2] - k[2] * w[1], k[2] * w[0] - k[0] * w[2], k[0] * w[1] - k[1] * w[0]];
+  return [0, 1, 2].map(i => w[i] * ct + kx[i] * st + k[i] * kw * (1 - ct));
+}
+
+function slerpDir(a, b, t) {
+  const v = [0, 1, 2].map(i => a[i] + (b[i] - a[i]) * t);
+  const L = Math.hypot(v[0], v[1], v[2]) || 1;
+  return [v[0] / L, v[1] / L, v[2] / L];
+}
+
+// Where a piece is being drawn right now: in a finger, gliding, or in its slot.
+// "show me" puts every piece in its own place without touching the answer.
+function mapSlotOf(key) { return REVIEW.shown ? key : targetHolding(key); }
+function mapCentre(key, now) {
+  const h = REVIEW.hold;
+  if (h && h.key === key) return h.dir;
+  const slot = reviewTarget(mapSlotOf(key));
+  const to = slot ? slot.dir : reviewTarget(key).dir;
+  const an = REVIEW.anim.get(key);
+  if (!an) return to;
+  const t = Math.min(1, (now - an.t0) / MAP_GLIDE_MS);
+  if (t >= 1) { REVIEW.anim.delete(key); return to; }
+  const e = 1 - Math.pow(1 - t, 3);
+  return slerpDir(an.from, to, e);
+}
+
+// A piece's own figure: its constellation's segments among its own stars,
+// and any star a segment runs to. Serpens' two halves each take only theirs.
+function mapFigure(t) {
+  if (t._fig) return t._fig;
+  const mine = new Set(t.stars);
+  const segs = FIGS.filter(f => f.con === t.con && (mine.has(f.a) || mine.has(f.b)));
+  const stars = new Set(t.stars);
+  for (const f of segs) { stars.add(f.a); stars.add(f.b); }
+  return (t._fig = { segs, stars: [...stars] });
+}
+
+// The figures that are NOT on the table as pieces, drawn where they belong:
+// the rest of the groups, and the ring of neighbours when it is on. They are
+// what makes this one sky rather than one group.
+// Worked out once per group and switch, not per frame: the ring is a search
+// over every figure's stars.
+let MAP_CTX = null;
+function mapContext() {
+  const id = reviewGroup().id + (REVIEW.near ? '+' : '');
+  if (MAP_CTX && MAP_CTX.id === id) return MAP_CTX;
+  const own = new Set(reviewGroup().cons);
+  const other = [];
+  for (const g of REVIEW_GROUPS) for (const a of g.cons) if (!own.has(a)) other.push(a);
+  const near = REVIEW.near ? reviewNeighbours(reviewGroup().cons)
+                                 .filter(a => !other.includes(a)) : [];
+  return (MAP_CTX = { id, other, near });
+}
+
+// Convex hull, monotone chain. The card a piece is drawn on is this hull
+// stroked fat with round joins, which gives a rounded patch around the shape
+// without a single path per star.
+function hull(pts) {
+  const p = pts.slice().sort((a, b) => a.x - b.x || a.y - b.y);
+  if (p.length < 3) return p;
+  const cr = (o, a, b) => (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x);
+  const lo = [], up = [];
+  for (const q of p) {
+    while (lo.length >= 2 && cr(lo[lo.length - 2], lo[lo.length - 1], q) <= 0) lo.pop();
+    lo.push(q);
+  }
+  for (let i = p.length - 1; i >= 0; i--) {
+    const q = p[i];
+    while (up.length >= 2 && cr(up[up.length - 2], up[up.length - 1], q) <= 0) up.pop();
+    up.push(q);
+  }
+  return lo.slice(0, -1).concat(up.slice(0, -1));
+}
+
+// What the last frame drew, topmost last, for the hit test -- the same
+// promise `proj` keeps for the stars: a piece is grabbable where it was drawn.
+let MAP_DRAWN = [];
+
+function mapLine(cam, a, b) {
+  const p = project(a, cam), q = project(b, cam);
+  if (!p || !q) return;
+  cx2.moveTo(p.x, p.y); cx2.lineTo(q.x, q.y);
+}
+
+function drawMap(cam, now) {
+  MAP_DRAWN = [];
+  const pos = d => [d[0] * R0, d[1] * R0, d[2] * R0];
+
+  // --- the rest of the sky, where it really is: faint, and never a piece
+  const ctx = mapContext();
+  for (const [list, alpha, dotA] of [[ctx.near, 0.12, 0.25], [ctx.other, 0.3, 0.55]]) {
+    if (!list.length) continue;
+    cx2.strokeStyle = `rgba(130,175,235,${alpha})`;
+    cx2.lineWidth = 1;
+    cx2.beginPath();
+    for (const a of list)
+      for (const f of FIGS) if (f.con === a) mapLine(cam, pos(f.a.dir), pos(f.b.dir));
+    cx2.stroke();
+    cx2.globalAlpha = dotA;
+    for (const a of list)
+      for (const st of conStars(a)) {
+        const p = project(pos(st.dir), cam);
+        if (!p || p.x < -20 || p.x > W + 20 || p.y < -20 || p.y > H + 20) continue;
+        cx2.fillStyle = colorFor(st.sp);
+        cx2.beginPath(); cx2.arc(p.x, p.y, Math.max(0.8, sizeOf(st, p.z) * 0.8), 0, 6.2832);
+        cx2.fill();
+      }
+    cx2.globalAlpha = 1;
+  }
+
+  // --- the pieces, the last one touched on top
+  const order = REVIEW.order.filter(k => reviewTarget(k));
+  if (REVIEW.hold) {
+    const i = order.indexOf(REVIEW.hold.key);
+    if (i >= 0) { order.splice(i, 1); order.push(REVIEW.hold.key); }
+  }
+  const labels = [];
+  for (const key of order) {
+    const t = reviewTarget(key);
+    const fig = mapFigure(t);
+    const c = mapCentre(key, now);
+    const at = new Map();
+    for (const st of fig.stars) {
+      const p = project(pos(mapCarry(t.dir, c, st.dir)), cam);
+      if (p) at.set(st, p);
+    }
+    const pts = [...at.values()].filter(p => p.theta < 2.4);
+    if (!pts.length) continue;
+    const hl = hull(pts);
+    const held = REVIEW.hold && REVIEW.hold.key === key;
+    const slot = mapSlotOf(key);
+    const right = slot === key;
+    // The card. Opaque rather than translucent, so where two overlap the one
+    // on top hides the other the way a piece of card does, and a fill and a
+    // fat stroke of one colour meet with no seam.
+    const card = held ? '#221a33'
+      : !REVIEW.checked ? '#131924'
+      : right ? '#0f2a18' : REVIEW.shown ? '#10213a' : '#2e1216';
+    const edge = held ? REV_PENDING
+      : !REVIEW.checked ? '#2a3445'
+      : right ? REV_RIGHT : REVIEW.shown ? REV_TRUTH : REV_WRONG;
+    cx2.lineJoin = 'round'; cx2.lineCap = 'round';
+    cx2.beginPath();
+    hl.forEach((p, i) => (i ? cx2.lineTo(p.x, p.y) : cx2.moveTo(p.x, p.y)));
+    cx2.closePath();
+    cx2.strokeStyle = edge; cx2.lineWidth = 2 * MAP_PAD + 3; cx2.stroke();
+    cx2.strokeStyle = card; cx2.lineWidth = 2 * MAP_PAD; cx2.stroke();
+    cx2.fillStyle = card; cx2.fill();
+    // the figure, brighter than the context: this is the thing being moved
+    cx2.strokeStyle = 'rgba(150,190,245,0.85)'; cx2.lineWidth = 1.2;
+    cx2.beginPath();
+    for (const f of fig.segs) {
+      const a = at.get(f.a), b = at.get(f.b);
+      if (a && b) { cx2.moveTo(a.x, a.y); cx2.lineTo(b.x, b.y); }
+    }
+    cx2.stroke();
+    for (const st of fig.stars) {
+      const p = at.get(st);
+      if (!p) continue;
+      cx2.fillStyle = colorFor(st.sp);
+      cx2.beginPath(); cx2.arc(p.x, p.y, sizeOf(st, p.z), 0, 6.2832); cx2.fill();
+    }
+    MAP_DRAWN.push({ key, hull: hl });
+    // No names until the check -- a name on a piece is half of the shape
+    // question handed over. After it, each piece says what it was.
+    if (REVIEW.checked) {
+      let sx = 0, sy = 0;
+      for (const p of pts) { sx += p.x; sy += p.y; }
+      labels.push({ text: t.label, x: sx / pts.length, y: sy / pts.length,
+                    col: right ? REV_RIGHT : REVIEW.shown ? REV_TRUTH : REV_WRONG });
+    }
+  }
+  cx2.lineJoin = 'miter'; cx2.lineCap = 'butt';
+  if (labels.length) {
+    cx2.font = '600 12.5px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
+    cx2.textAlign = 'center'; cx2.textBaseline = 'middle';
+    for (const l of labels) { cx2.fillStyle = l.col; cx2.fillText(l.text, l.x, l.y); }
+    cx2.textAlign = 'left';
+  }
+}
+
+// The piece under a pixel: inside its card, which is its hull plus the pad.
+// Topmost first, so the piece you can see is the piece you get.
+function mapPieceAt(px, py) {
+  if (!mapOn()) return null;
+  const reach = MAP_PAD + (coarse() ? 8 : 2);
+  for (let i = MAP_DRAWN.length - 1; i >= 0; i--) {
+    const hl = MAP_DRAWN[i].hull;
+    if (!hl.length) continue;
+    let inside = hl.length >= 3, best = Infinity;
+    for (let j = 0; j < hl.length; j++) {
+      const a = hl[j], b = hl[(j + 1) % hl.length];
+      if (hl.length >= 3 && (b.x - a.x) * (py - a.y) - (b.y - a.y) * (px - a.x) < 0)
+        inside = false;
+      const dx = b.x - a.x, dy = b.y - a.y, L2 = dx * dx + dy * dy;
+      const u = L2 ? Math.max(0, Math.min(1, ((px - a.x) * dx + (py - a.y) * dy) / L2)) : 0;
+      best = Math.min(best, Math.hypot(px - a.x - u * dx, py - a.y - u * dy));
+    }
+    if (inside || best <= reach) return MAP_DRAWN[i].key;
+  }
+  return null;
+}
+
+// Picked up by where the finger is ON it, not by its centre: the piece stays
+// under the finger at the spot it was taken by, which is what makes it feel
+// held rather than snatched to the fingertip.
+function mapGrab(px, py) {
+  if (!mapOn() || REVIEW.checked) return false;
+  const key = mapPieceAt(px, py);
+  if (!key) return false;
+  const cam = camera();
+  const c = mapCentre(key, performance.now());
+  REVIEW.anim.delete(key);
+  REVIEW.hold = { key, x: px, y: py, dir: c, grip: c, under: unproject(px, py, cam) };
+  REVIEW.order = REVIEW.order.filter(k => k !== key).concat(key);
+  return true;
+}
+
+// The finger's direction now, carried the same way the grip was: the centre
+// is to the finger what it was when the piece was picked up.
+function mapFollow() {
+  const h = REVIEW.hold;
+  const now = unproject(h.x, h.y, camera());
+  h.dir = mapCarry(h.under, now, h.grip);
+}
+function mapMove(px, py) {
+  const h = REVIEW.hold;
+  if (!h) return;
+  moved += Math.abs(px - h.x) + Math.abs(py - h.y);
+  h.x = px; h.y = py;
+  mapFollow();
+}
+
+// A piece held at the side of the sky turns the sky under it, the way a
+// planisphere's disc turns under a hand: faster the further in. It is the
+// same turn a drag of the black would make, so everything else -- the date
+// readout going stale, the pole staying put -- follows from turn().
+function mapTick(now) {
+  const h = REVIEW.hold;
+  if (!h || !mapOn()) { MAP_TICK = null; return; }
+  now = now ?? performance.now();
+  const dt = MAP_TICK === null ? 0 : Math.min(0.05, (now - MAP_TICK) / 1000);
+  MAP_TICK = now;
+  const e = MAP_EDGE();
+  const into = h.x < e ? (e - h.x) / e : h.x > W - e ? -(h.x - (W - e)) / e : 0;
+  if (!into || !dt) return;
+  turn(MAP_TURN * dt * Math.max(-1, Math.min(1, into)), 0);
+  seasonOut.classList.add('stale');
+  mapFollow();
+}
+let MAP_TICK = null;
+
+// Let go: into the nearest slot, and whatever was in it goes to the slot this
+// one came from. Too far from any slot and it goes back, because a piece
+// dropped on empty black was not put anywhere.
+function mapDrop() {
+  const h = REVIEW.hold;
+  if (!h) return;
+  REVIEW.hold = null; MAP_TICK = null;
+  const from = targetHolding(h.key);
+  let best = null, bc = Math.cos(MAP_SNAP_DEG * Math.PI / 180);
+  for (const t of REVIEW.targets) {
+    const c = dot3(t.dir, h.dir);
+    if (c > bc) { bc = c; best = t; }
+  }
+  const t0 = performance.now();
+  if (best && best.key !== from) {
+    const other = REVIEW.place.get(best.key);
+    REVIEW.place.set(best.key, h.key);
+    REVIEW.place.set(from, other);
+    // the one that was there glides out from where it was
+    REVIEW.anim.set(other, { from: best.dir, t0 });
+    REVIEW.order = REVIEW.order.filter(k => k !== h.key).concat(h.key);
+  }
+  REVIEW.anim.set(h.key, { from: h.dir, t0 });
+  renderReview();
+}
+function mapCancel() {
+  const h = REVIEW.hold;
+  if (!h) return;
+  REVIEW.hold = null; MAP_TICK = null;
+  REVIEW.anim.set(h.key, { from: h.dir, t0: performance.now() });
+}
+
+// "show me" glides every piece that was wrong from where you left it to
+// where it belongs, which is the whole group fitting back together in front
+// of you -- the point of doing this on a map rather than in a list.
+function mapShow() {
+  const t0 = performance.now();
+  for (const t of REVIEW.targets) {
+    const was = targetHolding(t.key);
+    if (was !== t.key) REVIEW.anim.set(t.key, { from: reviewTarget(was).dir, t0 });
+  }
+}
+
+function mapPanelHTML() {
+  const n = REVIEW.targets.length, right = reviewScore();
+  let h = `<p class="ask">These ${n} shapes are in each other’s places, and the `
+    + `faint ones around them are the other pair, where they belong. `
+    + `<em>Drag a shape onto another</em> and they swap; hold it at the side `
+    + `of the sky to turn the sky under it.</p>`;
+  h += `<div class="go">`;
+  if (!REVIEW.checked) h += `<button class="primary" id="rcheck">check</button>`;
+  else {
+    h += `<button class="primary" id="ragain">deal this group again</button>`;
+    if (right < n) h += `<button id="rshow"${REVIEW.shown ? ' disabled' : ''}>show me</button>`;
+  }
+  h += `<span class="kbd">⏎</span></div>`;
+  if (REVIEW.checked) {
+    const misses = [];
+    for (const t of REVIEW.targets) {
+      const got = REVIEW.place.get(t.key);
+      if (got !== t.key)
+        misses.push(`<li><em>${esc(t.label)}</em> — you put ${esc(reviewLabel(got))} there</li>`);
+    }
+    h += `<div class="why${misses.length ? ' miss' : ''}">`;
+    h += misses.length ? `${right} of ${n} in place.<ul>${misses.join('')}</ul>`
+      : `All ${n} in place.<div class="d">Turn the sky to see where the next group joins on.</div>`;
+    h += `</div>`;
+  }
+  return h;
+}
+
 // ---- the panel -----------------------------------------------------------
 function renderReview() {
   const el = qel('review');
@@ -6100,7 +6536,8 @@ function renderReview() {
     + `${esc(REVIEW_KINDS.find(k => k.id === REVIEW.kind).label)}</span>`
     + `<span>${spec
         ? (BY_CLASS.size ? `${BY_CLASS.size} of 7 classes on the shelf` : 'no frames')
-        : REVIEW.checked ? `<b>${right}</b>/${n} placed right`
+        : REVIEW.checked ? `<b>${right}</b>/${n} ${REVIEW.kind === 'map' ? 'in place' : 'placed right'}`
+        : REVIEW.kind === 'map' ? `${n} shapes, shuffled`
                          : `${put} of ${n} placed`}</span></div>`;
 
   if (spec) {
@@ -6113,6 +6550,8 @@ function renderReview() {
     h += ladderHTML();
   } else if (!n) {
     h += `<p class="ask">Nothing in this catalogue to place for that group.</p>`;
+  } else if (REVIEW.kind === 'map') {
+    h += mapPanelHTML();
   } else {
     // The instruction has to describe the sky the reader is actually looking
     // at: "twelve stars are ringed" over an unmarked sky is the card telling
@@ -6203,10 +6642,13 @@ function renderReview() {
   }
 
   // ---- what is being reviewed
-  h += `<div id="rsetup"><div class="lab">group</div><div class="segs">`;
-  for (let i = 0; i < REVIEW_GROUPS.length; i++)
-    h += `<button data-g="${i}" class="${REVIEW.group === i ? 'on' : ''}">`
-      + `${esc(REVIEW_GROUPS[i].label)}</button>`;
+  const map = REVIEW.kind === 'map';
+  const groups = map ? MAP_GROUPS : REVIEW_GROUPS;
+  const at = map ? REVIEW.mapGroup : REVIEW.group;
+  h += `<div id="rsetup"><div class="lab">${map ? 'groups' : 'group'}</div><div class="segs">`;
+  for (let i = 0; i < groups.length; i++)
+    h += `<button data-g="${i}" class="${at === i ? 'on' : ''}">`
+      + `${esc(groups[i].label)}</button>`;
   h += `</div><div class="lab">what to review</div><div class="segs">`;
   for (const k of REVIEW_KINDS) {
     if (k.id === 'spectra' && !catPossible('spec')) continue;
@@ -6242,7 +6684,11 @@ function renderReview() {
   if (fr) fr.onclick = () => { frameBoard(); renderReview(); };
   const ck = qel('rcheck'); if (ck) ck.onclick = checkBoard;
   const ag = qel('ragain'); if (ag) ag.onclick = () => { buildBoard(); reviewPose(); renderReview(); };
-  const sw = qel('rshow'); if (sw) sw.onclick = () => { REVIEW.shown = true; renderReview(); };
+  const sw = qel('rshow');
+  if (sw) sw.onclick = () => {
+    if (REVIEW.kind === 'map' && !REVIEW.shown) mapShow();
+    REVIEW.shown = true; renderReview();
+  };
   const nb = qel('rnear');
   // Re-isolated, not re-posed: turning the ring on and off must not take the
   // sky back to where the board opened, because the ring is the thing you
@@ -6264,8 +6710,14 @@ function renderReview() {
   el.querySelectorAll('[data-g]').forEach(b => {
     b.onclick = () => {
       const i = parseInt(b.dataset.g, 10);
-      if (i === REVIEW.group) return;
-      REVIEW.group = i; buildBoard(); reviewPose(); renderReview();
+      if (REVIEW.kind === 'map') {
+        if (i === REVIEW.mapGroup) return;
+        REVIEW.mapGroup = i;
+      } else {
+        if (i === REVIEW.group) return;
+        REVIEW.group = i;
+      }
+      buildBoard(); reviewPose(); renderReview();
     };
   });
   el.querySelectorAll('[data-rk]').forEach(b => {
@@ -6328,7 +6780,7 @@ window.addEventListener('keydown', e => {
     if (REVIEW.kind === 'spectra') return;
     if (/^[1-9]$/.test(e.key)) {
       const i = parseInt(e.key, 10) - 1;
-      if (!REVIEW.checked && i < REVIEW.chips.length) {
+      if (REVIEW.kind !== 'map' && !REVIEW.checked && i < REVIEW.chips.length) {
         REVIEW.sel = REVIEW.chips[i]; renderReview(); e.preventDefault();
       }
     } else if (e.key === 'Enter') {
@@ -6537,8 +6989,10 @@ cv.addEventListener('pointerdown', e => {
   if (e.pointerType !== 'touch') return;
   TOUCHES.set(e.pointerId, { x: ex(e), y: ey(e) });
   if (TOUCHES.size === 2) {
-    // a second finger ends the drag rather than fighting it
+    // a second finger ends the drag rather than fighting it -- and puts a
+    // held piece back, rather than dropping it wherever the first one was
     dragging = false; vx = vy = 0;
+    mapCancel();
     cv.classList.remove('drag');
     TWEEN = null;
     PINCHED = true;
