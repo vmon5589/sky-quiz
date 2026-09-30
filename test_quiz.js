@@ -275,6 +275,9 @@ src += '\n;globalThis.__page = { build, resize, quizBoot, nextQuestion, answer, 
      + 'TOUCHES, zoomField, get PINCHED() { return PINCHED; }, '
      + 'get CVX() { return CVX; }, get CVY() { return CVY; }, '
      + 'set yaw2(v) { yaw = v; }, set pitch2(v) { pitch = v; }, '
+     + 'get asSeen() { return asSeen; }, set asSeen2(v) { asSeen = v; }, '
+     + 'zenithDir, rollAt, seenLat, SEEN_LAT_DEFAULT, project, turn, aimAt, '
+     + 'sunRA, seasonDate, '
      + 'get dragging() { return dragging; }, set dragging(v) { dragging = v; }, '
      + 'fire: (ev, e) => (document.getElementById(\'sky\')._on[ev] || []).forEach(f => f(e)), '
      + 'get fovDeg2() { return fovDeg; }, set fovDeg2(v) { fovDeg = v; }, '
@@ -2735,6 +2738,186 @@ ok(P.QUIZ.best === 25, `best streak kept: ${P.QUIZ.best}`);
     console.log(`  golden: ${Object.keys(want.boards).length} boards and `
       + `${Object.keys(want.questions).length} question kinds framed as recorded`);
   }
+}
+
+// ============================================ "as seen": the sky's own tilt
+// camera() spins the picture until overhead is up, solving for the angle
+// geometrically. Checked here against the textbook parallactic angle, which
+// gets there by a different road:
+//     tan q = sin H / (tan(lat) cos(dec) - sin(dec) cos H)
+// where q is how far celestial north leans clockwise from straight up. So on
+// screen, a step north from the centre of the view must point q clockwise of
+// up -- at every aim, on every date, from both hemispheres.
+//
+// After the golden baseline, like the block below, because it moves the
+// camera and the date.
+{
+  const was = { yaw: P.yaw, pitch: P.pitch, fov: P.fovDeg, day: P.currentDay() };
+  const wrap = a => Math.atan2(Math.sin(a), Math.cos(a));
+  const deg = a => (a * 180 / Math.PI).toFixed(2);
+  const cx = () => P.W() / 2, cy = () => P.oy0();
+  P.fovDeg2 = 70;
+
+  // where a step from the centre towards `to` lands, clockwise from up
+  function leanOf(to) {
+    const cam = P.camera(), f = cam.f, e = 1e-3;
+    const p = P.project([(f[0] + to[0] * e) * 100, (f[1] + to[1] * e) * 100,
+                         (f[2] + to[2] * e) * 100], cam);
+    return Math.atan2(p.x - cx(), cy() - p.y);
+  }
+  function northOf(f) {
+    const dec = Math.asin(f[2]), ra = Math.atan2(f[1], f[0]);
+    return [-Math.sin(dec) * Math.cos(ra), -Math.sin(dec) * Math.sin(ra), Math.cos(dec)];
+  }
+
+  // -- north up is untouched: no spin at all, whatever the date
+  P.asSeen2 = false;
+  P.yaw2 = 1.3; P.pitch2 = 0.4;
+  ok(P.camera().roll === 0, 'north up still spins the picture');
+  ok(Math.abs(leanOf(northOf(P.camera().f))) < 1e-6, 'north up does not have north up');
+
+  function sweep(label) {
+    const lat = P.seenLat() * Math.PI / 180;
+    let worst = 0, n = 0, spun = 0;
+    for (const day of [0, 80, 172, 266, 355]) {
+      P.setDay(day);
+      const lst = P.sunRA(P.seasonDate(day)) + Math.PI;
+      for (let y = 0; y < 360; y += 15) for (let pd = -75; pd <= 85; pd += 10) {
+        P.yaw2 = y * Math.PI / 180; P.pitch2 = pd * Math.PI / 180;
+        const f = P.camera().f, Z = P.zenithDir();
+        // within 3 degrees of overhead or underfoot the tilt is ill-defined
+        if (Math.abs(f[0] * Z[0] + f[1] * Z[1] + f[2] * Z[2]) > Math.cos(3 * Math.PI / 180)) continue;
+        const dec = Math.asin(f[2]), H = lst - Math.atan2(f[1], f[0]);
+        const q = Math.atan2(Math.sin(H),
+          Math.tan(lat) * Math.cos(dec) - Math.sin(dec) * Math.cos(H));
+        const err = Math.abs(wrap(leanOf(northOf(f)) - q));
+        worst = Math.max(worst, err); n++;
+        if (Math.abs(q) > 0.5) spun++;
+      }
+    }
+    ok(n > 1000 && spun > n / 4, `${label}: the sweep tested ${n} aims, ${spun} of them tilted`);
+    ok(worst < 1e-5, `${label}: north leans ${deg(worst)} degrees off the parallactic angle`);
+  }
+  P.asSeen2 = true;
+  sweep(`latitude ${P.seenLat()}`);
+
+  // overhead is up: a step towards the zenith goes straight up the screen
+  P.setDay(300); P.yaw2 = 2.0; P.pitch2 = 0.1;
+  {
+    const f = P.camera().f, Z = P.zenithDir(), k = Z[0] * f[0] + Z[1] * f[1] + Z[2] * f[2];
+    ok(Math.abs(leanOf([Z[0] - k * f[0], Z[1] - k * f[1], Z[2] - k * f[2]])) < 1e-6,
+       'as seen, but overhead is not up');
+  }
+  // and the date is what drives it: the same aim half a year on is tilted
+  // differently, because the sky has turned under it
+  {
+    P.setDay(0); const r0 = P.camera().roll;
+    P.setDay(182); const r1 = P.camera().roll;
+    ok(Math.abs(wrap(r1 - r0)) > 0.3,
+       `the tilt moved only ${deg(Math.abs(wrap(r1 - r0)))} degrees in half a year`);
+  }
+
+  // -- the latitude is the one typed in, Toronto's until then, and never the
+  // captures' -- the payload here carries a site latitude of 35.2, and a
+  // rebuild with another one must not move it either
+  const latEl = document.getElementById('seenLat');
+  const hint = () => document.getElementById('tAsSeen').title;
+  const ns = () => document.getElementById('seenLatNS').textContent;
+  ok(P.SEEN_LAT_DEFAULT === 43.7 && P.seenLat() === 43.7,
+     `the tilt starts from ${P.seenLat()} degrees, not Toronto's`);
+  P.build(Object.assign({}, PAYLOAD, { site_lat: -12.5 }));
+  ok(P.seenLat() === 43.7, `the captures' site latitude reached the tilt: ${P.seenLat()}`);
+  P.build(PAYLOAD);
+  ok(/43\.7°N/.test(hint()) && ns() === '°N',
+     `the hint does not name Toronto's latitude: ${hint()}`);
+
+  // typing a southern one takes, is named as southern, is remembered, and the
+  // sky tilts the other way -- which the sweep has to follow
+  latEl.value = '-33.9'; latEl._fire('input');
+  ok(P.seenLat() === -33.9, `typed -33.9, the tilt uses ${P.seenLat()}`);
+  ok(/33\.9°S/.test(hint()) && ns() === '°S', `a southern latitude reads as ${hint()}`);
+  ok(localStorage.getItem('quizSeenLat') === '-33.9', 'the typed latitude was not remembered');
+  sweep('latitude -33.9');
+
+  // half-typed and emptied boxes leave the last good one, and leaving the box
+  // writes it back; out-of-range values stop at the pole
+  for (const junk of ['-', '', ' ']) {
+    latEl.value = junk; latEl._fire('input');
+    ok(P.seenLat() === -33.9, `typing "${junk}" moved the latitude to ${P.seenLat()}`);
+  }
+  latEl._fire('change');
+  ok(latEl.value === '-33.9', `leaving an emptied box left "${latEl.value}" in it`);
+  latEl.value = '120'; latEl._fire('input');
+  ok(P.seenLat() === 90, `typed 120, the latitude is ${P.seenLat()}`);
+  latEl.value = '43.7'; latEl._fire('input');
+  ok(P.seenLat() === 43.7, 'could not type the latitude back');
+
+  // -- the sky still follows the finger. A drag arrives in screen pixels and
+  // turn() turns the north-up chart, so with the picture spun a quarter or a
+  // half turn an unspun drag sends the sky sideways or backwards.
+  function dragTracks(yawD, pitchD, day) {
+    P.setDay(day); P.yaw2 = yawD * Math.PI / 180; P.pitch2 = pitchD * Math.PI / 180;
+    const cam = P.camera(), D = P.unproject(cx(), cy(), cam);
+    const roll = cam.roll;
+    P.turn(6, -4);
+    const p = P.project([D[0] * 100, D[1] * 100, D[2] * 100], P.camera());
+    const mx = p.x - cx(), my = p.y - cy();
+    const off = Math.abs(wrap(Math.atan2(my, mx) - Math.atan2(-4, 6)));
+    const len = Math.hypot(mx, my) / Math.hypot(6, -4);
+    ok(off < 0.05 && Math.abs(len - 1) < 0.05,
+       `tilted ${deg(roll)}: a drag of (6,-4) moved the sky (${mx.toFixed(2)},${my.toFixed(2)})`);
+    return roll;
+  }
+  const rolls = [];
+  for (const [y, pd, day] of [[40, 20, 0], [200, 60, 100], [300, -10, 250], [90, 5, 300],
+                              [120, 45, 30], [10, 70, 200]]) rolls.push(dragTracks(y, pd, day));
+  ok(rolls.some(r => Math.abs(r) > 2), 'no drag case had the picture near upside down');
+  ok(rolls.some(r => Math.abs(r) > 0.8 && Math.abs(r) < 2.3), 'no drag case had it on its side');
+
+  // -- zooming does not spin the sky. The tilt is the one for the middle of
+  // the view, so a zoom that re-aims to hold the cursor's star moves the
+  // middle and turns the picture -- and near overhead, where the right tilt
+  // changes fastest, the Cassiopeia -> Aries board spun half a turn a notch
+  // on 29 September from Toronto. As seen, the wheel zooms about the centre:
+  // the aim does not move, so neither can the tilt.
+  {
+    const R = P.REVIEW, was = { on: R.on, group: R.group, kind: R.kind };
+    P.asSeen2 = false;
+    P.setMode(true);
+    R.group = P.REVIEW_GROUPS.findIndex(g => g.id === 'cas'); R.kind = 'shapes';
+    P.setDay(271); P.buildBoard(); P.reviewPose(); settle();
+    P.asSeen2 = true;
+    const Z = P.zenithDir(), f = P.camera().f;
+    ok(Math.acos(f[0] * Z[0] + f[1] * Z[1] + f[2] * Z[2]) < 10 * Math.PI / 180,
+       'the Cassiopeia board no longer opens near overhead, so this tests nothing');
+    for (const fac of [Math.exp(0.01), Math.exp(-0.01)]) {
+      P.reviewPose(); settle();
+      const aim = { yaw: P.yaw, pitch: P.pitch }, r0 = P.camera().roll, fov0 = P.fovDeg;
+      let worst = 0;
+      for (let i = 0; i < 80; i++) {
+        P.zoomAbout(cx() + 180, cy() + 100, fac);
+        worst = Math.max(worst, Math.abs(wrap(P.camera().roll - r0)));
+      }
+      ok(P.fovDeg !== fov0, 'the wheel did not zoom at all');
+      ok(P.yaw === aim.yaw && P.pitch === aim.pitch && worst === 0,
+         `as seen, zooming ${fac > 1 ? 'out' : 'in'} spun the sky ${deg(worst)} degrees`);
+    }
+    P.asSeen2 = false;
+    R.group = was.group; R.kind = was.kind; P.setMode(was.on);
+  }
+
+  // -- the buttons are one choice
+  document.getElementById('tNorthUp').onclick();
+  ok(!P.asSeen && document.getElementById('tNorthUp').classList.contains('on')
+     && !document.getElementById('tAsSeen').classList.contains('on'), 'north up did not take');
+  document.getElementById('tAsSeen').onclick();
+  ok(P.asSeen && document.getElementById('tAsSeen').classList.contains('on')
+     && !document.getElementById('tNorthUp').classList.contains('on'), 'as seen did not take');
+  document.getElementById('tNorthUp').onclick();
+
+  P.setDay(was.day); P.yaw2 = was.yaw; P.pitch2 = was.pitch; P.fovDeg2 = was.fov;
+  console.log('  as seen: the tilt is the parallactic angle at every aim, date and '
+    + 'hemisphere; drags track the pointer and zooms never spin it');
 }
 
 // ============================================ the legend on a touch screen

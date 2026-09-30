@@ -60,6 +60,9 @@
   #ctl button.seg { background: #21262d; border: 1px solid var(--border); color: var(--dim);
         border-radius: 7px; padding: 3px 10px; font-size: .74rem; cursor: pointer; }
   #ctl button.seg.on { background: #0d2b4e; border-color: var(--run); color: var(--run); }
+  #ctl input[type=number] { width: 64px; background: #21262d; border: 1px solid var(--border);
+        color: var(--text); border-radius: 7px; padding: 3px 6px; font-size: .74rem; }
+  #ctl .unit { font-size: .74rem; color: var(--dim); }
   #ctl .sep { border-top: 1px solid var(--border); margin: 11px 0 0; padding-top: 10px; }
   /* Minimise. The panel is 340px of controls over the bottom-left corner of a
      view whose whole point is the sky behind it, so it folds down to a chip
@@ -629,6 +632,16 @@
       <span class="val" id="seasonv">&mdash;</span>
     </div>
   </div>
+  <div class="row">
+    <label>orientation</label>
+    <button id="tNorthUp" class="seg on">north up</button>
+    <button id="tAsSeen" class="seg">as seen</button>
+  </div>
+  <div class="row" title="Where you stand, for the as-seen tilt: degrees north of the equator, negative for south.">
+    <label for="seenLat">latitude</label>
+    <input type="number" id="seenLat" min="-90" max="90" step="0.1" value="43.7">
+    <span class="unit" id="seenLatNS">°N</span>
+  </div>
 
   <p id="depthnote">Drag to turn the sky, scroll to zoom.</p>
 
@@ -1015,16 +1028,74 @@ function camera() {
   let r = [f[1] * 1 - f[2] * 0, f[2] * 0 - f[0] * 1, 0];
   const rl = Math.hypot(r[0], r[1], r[2]) || 1;
   r = [r[0] / rl, r[1] / rl, r[2] / rl];
-  const u = [r[1] * f[2] - r[2] * f[1],
-             r[2] * f[0] - r[0] * f[2],
-             r[0] * f[1] - r[1] * f[0]];
+  let u = [r[1] * f[2] - r[2] * f[1],
+           r[2] * f[0] - r[0] * f[2],
+           r[0] * f[1] - r[1] * f[0]];
+  // "As seen" spins the picture about its centre until straight overhead is
+  // up, and does nothing else: the aim, the drag and every star stay where
+  // north-up put them. See rollAt().
+  let roll = 0;
+  if (asSeen) {
+    roll = rollAt(f, r, u);
+    const c = Math.cos(roll), s = Math.sin(roll);
+    const r2 = [c * r[0] - s * u[0], c * r[1] - s * u[1], c * r[2] - s * u[2]];
+    u = [c * u[0] + s * r[0], c * u[1] + s * r[1], c * u[2] + s * r[2]];
+    r = r2;
+  }
   // Depth alone is invisible from the origin: moving a star along its own
   // line of sight cannot change where it projects. So the depth slider drags
   // the camera out with it, and the manual control only ever adds to that.
   const backDist = Math.max(back, depth * 0.55) * 900;
   const c = [-f[0] * backDist, -f[1] * backDist, -f[2] * backDist];
   // k such that half the field lands on half the screen, with 2k tan(theta/2)
-  return { f, r, u, c, focal: focalOf() };
+  return { f, r, u, c, focal: focalOf(), roll };
+}
+
+// ---- "as seen": the chart turned the way the sky is ---------------------
+// A chart puts celestial north up. Out under the sky, up is overhead, and the
+// angle between the two -- the parallactic angle -- is what makes Orion lie
+// on its side when it rises and the Plough stand on its handle below the
+// pole. It depends on where the thing is in YOUR sky, so it needs a latitude
+// and a moment: the moment is midnight on the date slider, the same one it
+// already turns the sky to, and the latitude is whatever is typed into the
+// box under it -- Toronto's until then. It is deliberately NOT the captures'
+// site latitude, even where the payload carries one: it is where the person
+// looking stands, not where the spectra were taken.
+let asSeen = false;
+const SEEN_LAT_DEFAULT = 43.7;           // Toronto
+let seenLatDeg = SEEN_LAT_DEFAULT;
+function seenLat() { return seenLatDeg; }
+
+// Straight overhead at local midnight on the slider's date: right ascension
+// the anti-solar point's (see goToDate), declination the latitude.
+function zenithDir() {
+  const lst = sunRA(seasonDate(currentDay())) + Math.PI;
+  const lat = seenLat() * Math.PI / 180;
+  return [Math.cos(lat) * Math.cos(lst), Math.cos(lat) * Math.sin(lst), Math.sin(lat)];
+}
+
+// How far to spin a north-up view looking along f so that overhead is up:
+// the zenith, laid into the plane of the screen, measured from u toward r.
+// Solved geometrically rather than from the textbook formula, so there is no
+// sign convention to get backwards. Looking straight up (or straight down)
+// there is no "towards overhead" at all, and the answer is north up -- which
+// is also what you see facing south and tipping your head back.
+function rollAt(f, r, u) {
+  const Z = zenithDir();
+  const k = Z[0] * f[0] + Z[1] * f[1] + Z[2] * f[2];
+  const t = [Z[0] - k * f[0], Z[1] - k * f[1], Z[2] - k * f[2]];
+  const x = t[0] * r[0] + t[1] * r[1] + t[2] * r[2];
+  const y = t[0] * u[0] + t[1] * u[1] + t[2] * u[2];
+  if (Math.hypot(x, y) < 1e-6) return 0;
+  return Math.atan2(x, y);
+}
+
+// A screen offset in the spun picture, as the same offset on the north-up
+// chart underneath -- which is the frame turn() is solved in.
+// Screen y runs DOWN, as the pointer's does.
+function unroll(dx, dy, roll) {
+  const c = Math.cos(roll), s = Math.sin(roll);
+  return [dx * c - dy * s, dx * s + dy * c];
 }
 
 // Stereographic, not gnomonic. A gnomonic projection is x/z -- a straight
@@ -1133,6 +1204,12 @@ function aimAt(D, px, py, focal) {
 function zoomAbout(px, py, factor) { zoomTo(px, py, fovDeg * factor); }
 
 function zoomTo(px, py, fov) {
+  // "As seen" zooms about the centre, as a pinch always does. Its tilt is the
+  // one for the middle of the view, and holding the cursor's star still moves
+  // that middle -- which near overhead, where the right tilt changes fastest,
+  // spun the picture half a turn a notch. With the middle held there is
+  // nothing to spin: the field changes and nothing else does.
+  if (asSeen) { zoomField(fov); return; }
   const before = camera();
   const D = unproject(px, py, before);
   fovDeg = Math.max(FOV_MIN, Math.min(FOV_MAX, fov));
@@ -2250,6 +2327,27 @@ function turn(dx, dy) {
   // Rotating about the camera's own axes instead removes the declination
   // change but doubles the drift, so this is the better of the two. Narrowing
   // the field shrinks it either way.
+  //
+  // The drag arrives in screen pixels. With the picture spun ("as seen"), a
+  // drag to the right on screen is some other direction on the chart this
+  // turns, so it is unspun first -- or the sky would slide off at an angle to
+  // the finger. The spin itself changes over the move, fastest near overhead,
+  // so the move is made once to see where the spin ends up and then made
+  // again with the spin halfway between: unspun by the starting angle alone,
+  // the sky twisted three degrees off the finger ten degrees from the zenith.
+  if (asSeen) {
+    const y0 = yaw, p0 = pitch, a0 = camera().roll;
+    turnChart(...unroll(dx, dy, a0));
+    const a1 = camera().roll;
+    yaw = y0; pitch = p0;
+    turnChart(...unroll(dx, dy, a0 + Math.atan2(Math.sin(a1 - a0), Math.cos(a1 - a0)) / 2));
+    return;
+  }
+  turnChart(dx, dy);
+}
+
+// turn() on the north-up chart.
+function turnChart(dx, dy) {
   const focal = focalOf();
   const cosP = Math.max(0.12, Math.cos(pitch));
   yaw += (dx / focal) / cosP;
@@ -3558,6 +3656,46 @@ function setGlow(on) {
   document.getElementById('tHalo').classList.toggle('on', on);
   document.getElementById('tPulse').classList.toggle('on', on);
 }
+// The pair is one choice, north up or as seen, the way class and natural are.
+// The hint carries the latitude, because it is the one thing the tilt rests
+// on that the picture cannot show.
+function paintOrient() {
+  document.getElementById('tNorthUp').classList.toggle('on', !asSeen);
+  document.getElementById('tAsSeen').classList.toggle('on', asSeen);
+  const lat = seenLat(), ns = lat < 0 ? 'S' : 'N';
+  document.getElementById('tNorthUp').title = 'Celestial north at the top, as on a chart';
+  document.getElementById('tAsSeen').title =
+    'Tilt the sky the way it looks at midnight on this date, overhead at the top'
+    + ` — from ${+Math.abs(lat).toFixed(1)}°${ns}`;
+  document.getElementById('seenLatNS').textContent = '°' + ns;
+}
+document.getElementById('tNorthUp').onclick = () => { asSeen = false; paintOrient(); };
+document.getElementById('tAsSeen').onclick = () => { asSeen = true; paintOrient(); };
+
+// Typing into the box takes effect as soon as it reads as a number; a half-
+// typed "-" or an emptied box leaves the last good latitude standing, and
+// leaving the box writes that one back into it. Remembered in this browser,
+// like the best streak, so it is typed once.
+const seenLatEl = document.getElementById('seenLat');
+function setSeenLat(v, save) {
+  if (!isFinite(v)) return false;
+  seenLatDeg = Math.max(-90, Math.min(90, v));
+  if (save) {
+    try { localStorage.setItem('quizSeenLat', String(seenLatDeg)); } catch (e) { /* private window */ }
+  }
+  paintOrient();
+  return true;
+}
+seenLatEl.addEventListener('input', () => {
+  if (String(seenLatEl.value).trim() !== '') setSeenLat(parseFloat(seenLatEl.value), true);
+});
+seenLatEl.addEventListener('change', () => { seenLatEl.value = String(seenLatDeg); });
+try {
+  const kept = localStorage.getItem('quizSeenLat');
+  if (kept !== null && setSeenLat(parseFloat(kept), false)) seenLatEl.value = String(seenLatDeg);
+} catch (e) { /* private window: Toronto it is */ }
+paintOrient();
+
 bClass.onclick = () => { colorMode = 'class'; setGlow(true); paintColor(); };
 bNat.onclick = () => { colorMode = 'natural'; setGlow(false); paintColor(); };
 paintColor();
