@@ -592,8 +592,9 @@
     <button id="tNat" class="seg">natural</button>
   </div>
   <div class="row">
-    <label>glow</label>
+    <label>star styling</label>
     <button id="tHalo" class="seg on">halos</button>
+    <button id="tRings" class="seg on">rings</button>
     <button id="tPulse" class="seg on">pulse</button>
   </div>
   <div class="row slider wide">
@@ -885,6 +886,10 @@ let showLabels = true, obsOnly = false, logDepth = false;
 // level it answers half the questions on the page by itself.
 let showStarNames = true;
 let showHalo = true, pulsing = true;
+// The "there is a spectrum here" ring, on its own switch: it is the one mark
+// that is about this project rather than about the sky, and someone learning
+// the constellations has no use for it.
+let showRings = true;
 let MAIN_CONS = new Set();      // constellations holding an observed star
 let CON_LABELS = [];            // {abbr, name, stars[]} for the figure captions
 let CON_RANK = new Map();       // abbr -> 0 (brightest figure) .. 87
@@ -1070,7 +1075,7 @@ function seenLat() { return seenLatDeg; }
 // the anti-solar point's (see goToDate), declination the latitude.
 function zenithDir() {
   const lst = sunRA(seasonDate(currentDay())) + Math.PI;
-  const lat = seenLat() * Math.PI / 180;
+  const lat = Math.max(-89.9, Math.min(89.9, seenLat())) * Math.PI / 180;
   return [Math.cos(lat) * Math.cos(lst), Math.cos(lat) * Math.sin(lst), Math.sin(lat)];
 }
 
@@ -1090,13 +1095,71 @@ function rollAt(f, r, u) {
   return Math.atan2(x, y);
 }
 
-// A screen offset in the spun picture, as the same offset on the north-up
-// chart underneath -- which is the frame turn() is solved in.
-// Screen y runs DOWN, as the pointer's does.
-function unroll(dx, dy, roll) {
-  const c = Math.cos(roll), s = Math.sin(roll);
-  return [dx * c - dy * s, dx * s + dy * c];
+// Moving the sky, as seen.
+//
+// A picture with overhead at the top is exactly the north-up picture of a
+// sky whose "north pole" is the zenith. So every way the sky is moved -- a
+// drag, the glide, aiming a star at a pixel -- is done in that frame: the
+// view's middle is turned into azimuth and altitude, the north-up code runs
+// on those unchanged, and the answer is turned back. The tilt is then right
+// at every instant rather than chasing the view, and near overhead a drag
+// turns the sky like a disc under the finger, the way north up does near
+// the pole.
+//
+// The frame: N towards the north point of the horizon, W = Z x N, Z overhead.
+function horizonFrame() {
+  const Z = zenithDir(), k = Z[2];
+  const n0 = [-k * Z[0], -k * Z[1], 1 - k * Z[2]];
+  const L = Math.hypot(n0[0], n0[1], n0[2]);
+  const N = [n0[0] / L, n0[1] / L, n0[2] / L];
+  const Wv = [Z[1] * N[2] - Z[2] * N[1], Z[2] * N[0] - Z[0] * N[2], Z[0] * N[1] - Z[1] * N[0]];
+  return [N, Wv, Z];
 }
+function toHorizon(v, H) {
+  return H.map(a => a[0] * v[0] + a[1] * v[1] + a[2] * v[2]);
+}
+// Run fn with yaw and pitch standing for azimuth and altitude, then put them
+// back as right ascension and declination. A fn that returns false changed
+// nothing that should be kept.
+function inHorizon(fn) {
+  const H = horizonFrame(), y0 = yaw, p0 = pitch;
+  const cp = Math.cos(pitch);
+  const h = toHorizon([cp * Math.cos(yaw), cp * Math.sin(yaw), Math.sin(pitch)], H);
+  yaw = Math.atan2(h[1], h[0]);
+  pitch = Math.asin(Math.max(-1, Math.min(1, h[2])));
+  const ok = fn(H);
+  if (ok === false) { yaw = y0; pitch = p0; return false; }
+  const ca = Math.cos(pitch), g = [ca * Math.cos(yaw), ca * Math.sin(yaw), Math.sin(pitch)];
+  const e = [0, 1, 2].map(i => g[0] * H[0][i] + g[1] * H[1][i] + g[2] * H[2][i]);
+  yaw = Math.atan2(e[1], e[0]);
+  if (yaw < 0) yaw += Math.PI * 2;
+  pitch = Math.max(-1.5533, Math.min(1.5533, Math.asin(Math.max(-1, Math.min(1, e[2])))));
+  return ok;
+}
+
+// Drag the sky from one pixel to another, keeping what was under the first
+// under the second. Used as seen, where the turn by the view's middle would
+// spin the sky under a finger near overhead.
+//
+// Near the zenith that is not always possible: with overhead kept at the top,
+// the zenith stays on the vertical line through the middle of the screen, so
+// a star a degree or two from it cannot be carried far sideways. There the
+// sky turns about the zenith instead, by the angle the finger swept round it
+// -- a planisphere's disc under the hand -- and a finger pushing on past
+// overhead simply stops, as north up stops at the pole.
+function grab(x0, y0, x1, y1) {
+  const cam = camera(), D = unproject(x0, y0, cam);
+  const y0w = yaw, p0w = pitch;
+  if (aimAt(D, x1, y1, focalOf()) && !aimClamped) return;
+  yaw = y0w; pitch = p0w;
+  const Z = zenithDir(), zs = project([Z[0] * R0, Z[1] * R0, Z[2] * R0], cam);
+  if (!zs) return;
+  const ax = x0 - zs.x, ay = zs.y - y0, bx = x1 - zs.x, by = zs.y - y1;
+  if (Math.hypot(ax, ay) < 1 || Math.hypot(bx, by) < 1) return;
+  const a = Math.atan2(ax * by - ay * bx, ax * bx + ay * by);
+  inHorizon(() => { yaw += a; });
+}
+let glideAt = null;           // the pixel the glide carries on from, as seen
 
 // Stereographic, not gnomonic. A gnomonic projection is x/z -- a straight
 // perspective divide -- and it runs to infinity at 90 degrees from the axis,
@@ -1154,6 +1217,13 @@ function unproject(px, py, cam) {
 // cos(pitch), so near the pole the walk was not a contraction and ran away by
 // hundreds of pixels.
 function aimAt(D, px, py, focal) {
+  if (asSeen) return inHorizon(H => aimNorthUp(toHorizon(D, H), px, py, focal));
+  return aimNorthUp(D, px, py, focal);
+}
+// Whether the last aim could not be had exactly and settled for the nearest
+// one -- which a drag, as seen, needs to know. Nothing north up reads it.
+let aimClamped = false;
+function aimNorthUp(D, px, py, focal) {
   const ox = px - ox0(), oy = -(py - oy0());
   const Rt = Math.hypot(ox, oy);
   const t = 2 * Math.atan(Rt / (2 * focal));
@@ -1169,6 +1239,7 @@ function aimAt(D, px, py, focal) {
   // per scroll click, in the right direction -- rather than refusing to zoom.
   // Everywhere else this is exact.
   const ratio = Math.max(-1, Math.min(1, D[2] / M));
+  aimClamped = Math.abs(D[2]) > M;
   const phi = Math.atan2(b, c), as = Math.asin(ratio);
   const LIM = 1.5533;                           // never point at the pole itself
   let best = null, bd = Infinity, nearest = null, nd = Infinity;
@@ -1182,6 +1253,7 @@ function aimAt(D, px, py, focal) {
   }
   // Safety net for the case where both branches land past the pole limit.
   if (best === null) {
+    aimClamped = true;
     if (nearest === null) return false;
     best = Math.max(-LIM, Math.min(LIM, nearest));
   }
@@ -1511,7 +1583,7 @@ function draw() {
     // board's own radius -- and it pulses, so it takes the eye first. An
     // observed star that is not a target was reading as the one thing on the
     // sky you are meant to click.
-    if (s.obs && !boardOwnsHalo()) {
+    if (s.obs && showRings && !boardOwnsHalo()) {
       cx2.strokeStyle = hexA('#ffffff', 0.30 + 0.42 * pulse);
       cx2.lineWidth = 1.3;
       const gap = s.id === 'saturn' ? r * 1.4 : 4;
@@ -2259,7 +2331,8 @@ cv.addEventListener('pointermove', e => {
     const dx = e.clientX - lx, dy = e.clientY - ly;
     moved += Math.abs(dx) + Math.abs(dy);
     lx = e.clientX; ly = e.clientY;
-    turn(dx, dy);
+    if (asSeen) { grab(ex(e) - dx, ey(e) - dy, ex(e), ey(e)); glideAt = [ex(e), ey(e)]; }
+    else turn(dx, dy);
     vx = dx; vy = dy;                       // for the glide after release
     // The centring is no longer the one the date set -- but the date itself
     // still stands, and the planets are still placed by it, so the readout is
@@ -2328,21 +2401,8 @@ function turn(dx, dy) {
   // change but doubles the drift, so this is the better of the two. Narrowing
   // the field shrinks it either way.
   //
-  // The drag arrives in screen pixels. With the picture spun ("as seen"), a
-  // drag to the right on screen is some other direction on the chart this
-  // turns, so it is unspun first -- or the sky would slide off at an angle to
-  // the finger. The spin itself changes over the move, fastest near overhead,
-  // so the move is made once to see where the spin ends up and then made
-  // again with the spin halfway between: unspun by the starting angle alone,
-  // the sky twisted three degrees off the finger ten degrees from the zenith.
-  if (asSeen) {
-    const y0 = yaw, p0 = pitch, a0 = camera().roll;
-    turnChart(...unroll(dx, dy, a0));
-    const a1 = camera().roll;
-    yaw = y0; pitch = p0;
-    turnChart(...unroll(dx, dy, a0 + Math.atan2(Math.sin(a1 - a0), Math.cos(a1 - a0)) / 2));
-    return;
-  }
+  // As seen, the same turn made about the zenith instead of the pole.
+  if (asSeen) { inHorizon(() => turnChart(dx, dy)); return; }
   turnChart(dx, dy);
 }
 
@@ -2362,7 +2422,8 @@ let vx = 0, vy = 0;
 function glide() {
   if (TWEEN) { stepTween(); return; }        // a search turn overrides drift
   if (!dragging && (Math.abs(vx) > 0.05 || Math.abs(vy) > 0.05)) {
-    turn(vx, vy);
+    if (asSeen && glideAt) grab(glideAt[0], glideAt[1], glideAt[0] + vx, glideAt[1] + vy);
+    else turn(vx, vy);
     vx *= 0.93; vy *= 0.93;
   }
 }
@@ -3702,6 +3763,7 @@ paintColor();
 
 toggle('tLabels', () => showLabels, v => showLabels = v);
 toggle('tHalo', () => showHalo, v => showHalo = v);
+toggle('tRings', () => showRings, v => showRings = v);
 toggle('tPulse', () => pulsing, v => pulsing = v);
 toggle('tObs', () => obsOnly, v => obsOnly = v);
 toggle('tRawMag', () => rawMag, v => rawMag = v);
@@ -3716,6 +3778,7 @@ const HINTS = {
   tClass:  'Colour stars by spectral class',
   tNat:    'Colour stars as the eye sees them',
   tHalo:   'Give each star a glow',
+  tRings:  'Ring the stars there is a spectrum for',
   tPulse:  'Make the observed-star rings pulse',
   tRawMag: 'Cut faint stars out of the figures too — on under a question',
   b3d:     'Leave the sphere for true distances',

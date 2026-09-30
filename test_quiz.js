@@ -278,6 +278,8 @@ src += '\n;globalThis.__page = { build, resize, quizBoot, nextQuestion, answer, 
      + 'get asSeen() { return asSeen; }, set asSeen2(v) { asSeen = v; }, '
      + 'zenithDir, rollAt, seenLat, SEEN_LAT_DEFAULT, project, turn, aimAt, '
      + 'sunRA, seasonDate, '
+     + 'grab, get glideAt() { return glideAt; }, get vx() { return vx; }, '
+     + 'set vel2(v) { vx = vy = v; }, set TWEEN2(v) { TWEEN = v; }, '
      + 'get dragging() { return dragging; }, set dragging(v) { dragging = v; }, '
      + 'fire: (ev, e) => (document.getElementById(\'sky\')._on[ev] || []).forEach(f => f(e)), '
      + 'get fovDeg2() { return fovDeg; }, set fovDeg2(v) { fovDeg = v; }, '
@@ -2874,6 +2876,108 @@ ok(P.QUIZ.best === 25, `best streak kept: ${P.QUIZ.best}`);
   ok(rolls.some(r => Math.abs(r) > 2), 'no drag case had the picture near upside down');
   ok(rolls.some(r => Math.abs(r) > 0.8 && Math.abs(r) < 2.3), 'no drag case had it on its side');
 
+  // -- a finger drags the sky, and the sky under it stays under it. Near
+  // overhead the right tilt changes fastest, and on the Cassiopeia -> Aries
+  // board (29 September, Toronto: under 6 degrees from the zenith) turning
+  // by the view's middle spun the sky 234 degrees under a 160px swipe;
+  // holding the tilt still and easing it in after made it snap back like a
+  // rubber band. As seen, a drag is a grab solved about the zenith, so the
+  // star under the finger is where the finger is, the tilt is right at every
+  // move, and nothing moves once the finger and the glide stop.
+  {
+    const R = P.REVIEW, was = { on: R.on, group: R.group, kind: R.kind };
+    P.asSeen2 = false;
+    P.setMode(true);
+    R.group = P.REVIEW_GROUPS.findIndex(g => g.id === 'cas'); R.kind = 'shapes';
+    P.setDay(271); P.buildBoard(); P.reviewPose(); settle();
+    P.asSeen2 = true; P.vel2 = 0; P.TWEEN2 = null;
+    const Z = P.zenithDir(), f0 = P.camera().f;
+    ok(Math.acos(f0[0] * Z[0] + f0[1] * Z[1] + f0[2] * Z[2]) < 10 * Math.PI / 180,
+       'the Cassiopeia board no longer opens near overhead, so this tests nothing');
+    const mouse = (x, y) => ({ pointerId: 1, pointerType: 'mouse', button: 0,
+      clientX: x + P.CVX, clientY: y + P.CVY, preventDefault() {} });
+    const at = (D, cam) => P.project([D[0] * 100, D[1] * 100, D[2] * 100], cam || P.camera());
+    const pose = () => [P.yaw, P.pitch, P.camera().roll];
+
+    // One move of the finger, judged. Either the star it grabbed is under it
+    // (a grab), or -- too near the zenith for that -- the sky turned about the
+    // zenith by the angle the finger swept round it (the disc), or the finger
+    // pushed past overhead and the sky stopped. Anything else is the sky
+    // doing something the hand did not.
+    const zAt = cam => { const Zd = P.zenithDir(); return at(Zd, cam); };
+    const ang = (p, z) => Math.atan2(z.y - p.y, p.x - z.x);
+    function judge(D, before, x0, y0, x1, y1) {
+      const cam = P.camera(), p = at(D, cam);
+      if (p && Math.hypot(p.x - x1, p.y - y1) < 0.5) return 'grab';
+      if (pose().every((v, i) => v === before[i])) return 'stopped';
+      const zb = zAt(before.cam), za = zAt(cam), pb = at(D, before.cam);
+      const swept = wrap(ang({ x: x1, y: y1 }, zb) - ang({ x: x0, y: y0 }, zb));
+      const turned = wrap(ang(p, za) - ang(pb, zb));
+      return Math.abs(turned - swept) < 0.02 ? 'disc' : `wrong (swept ${deg(swept)}, turned ${deg(turned)})`;
+    }
+    const snap = () => Object.assign(pose(), { cam: P.camera() });
+
+    const kinds = {};
+    for (const [sx, sy, label, x00, y00] of [
+      [4, 0, 'sideways', -150, 60], [0, 4, 'down', -150, 60], [-3, 3, 'diagonal', -150, 60],
+      [0, -4, 'up', -150, 60], [4, 0, 'sideways near overhead', 60, -60],
+      [0, 4, 'down near overhead', 60, -60]]) {
+      P.reviewPose(); settle(); P.vel2 = 0;
+      let x = cx() + x00, y = cy() + y00;
+      P.fire('pointerdown', mouse(x, y));
+      const seen = {};
+      let bad = null;
+      for (let i = 0; i < 40; i++) {
+        const D = P.unproject(x, y, P.camera()), before = snap();
+        P.fire('pointermove', mouse(x + sx, y + sy));
+        const k = judge(D, before, x, y, x + sx, y + sy);
+        x += sx; y += sy;
+        seen[k] = (seen[k] || 0) + 1;
+        if (!['grab', 'disc', 'stopped'].includes(k) && !bad) bad = `move ${i}: ${k}`;
+        kinds[k] = (kinds[k] || 0) + 1;
+      }
+      ok(!bad, `as seen, a ${label} drag: ${bad}`);
+
+      // held still with the finger down: frame after frame, nothing moves
+      P.vel2 = 0;
+      const held = pose();
+      for (let i = 0; i < 30; i++) { P.glide(); P.draw(); }
+      ok(pose().every((v, i) => v === held[i]), `the sky moved on its own after a ${label} drag`);
+      P.fire('pointerup', mouse(x, y));
+    }
+    // both happen on this board, or the judge proved nothing. (Pushing on
+    // past overhead is a disc turn with next to nothing swept, so it is not
+    // required to come out as 'stopped'.)
+    for (const k of ['grab', 'disc'])
+      ok(kinds[k] > 0, `no move on the Cassiopeia board was a ${k}: ${JSON.stringify(kinds)}`);
+
+    // the glide carries on the way the finger went by the same rule, then
+    // stops dead
+    for (const [x00, y00] of [[120, -40], [-150, 60]]) {
+      P.reviewPose(); settle(); P.vel2 = 0;
+      let x = cx() + x00, y = cy() + y00;
+      P.fire('pointerdown', mouse(x, y));
+      for (let i = 0; i < 5; i++) { x += 6; P.fire('pointermove', mouse(x, y)); }
+      P.fire('pointerup', mouse(x, y));
+      const g = P.glideAt;
+      let frames = 0, bad = null, moved = 0;
+      while (frames < 400 && Math.abs(P.vx) > 0.05) {
+        const v = P.vx, D = P.unproject(g[0], g[1], P.camera()), before = snap();
+        P.glide(); frames++;
+        const k = judge(D, before, g[0], g[1], g[0] + v, g[1]);
+        if (k !== 'stopped') moved++;
+        if (!['grab', 'disc', 'stopped'].includes(k) && !bad) bad = `frame ${frames}: ${k}`;
+      }
+      ok(!bad && moved > 20, `the glide from (${x00},${y00}): ${bad || moved + ' frames moved'}`);
+      const rest = pose();
+      for (let i = 0; i < 30; i++) { P.glide(); P.draw(); }
+      ok(pose().every((w, i) => w === rest[i]), 'the sky kept moving once the glide was spent');
+    }
+
+    P.asSeen2 = false;
+    R.group = was.group; R.kind = was.kind; P.setMode(was.on);
+  }
+
   // -- zooming does not spin the sky. The tilt is the one for the middle of
   // the view, so a zoom that re-aims to hold the cursor's star moves the
   // middle and turns the picture -- and near overhead, where the right tilt
@@ -2918,6 +3022,41 @@ ok(P.QUIZ.best === 25, `best streak kept: ${P.QUIZ.best}`);
   P.setDay(was.day); P.yaw2 = was.yaw; P.pitch2 = was.pitch; P.fovDeg2 = was.fov;
   console.log('  as seen: the tilt is the parallactic angle at every aim, date and '
     + 'hemisphere; drags track the pointer and zooms never spin it');
+}
+
+// ============================================ the spectrum rings, on a switch
+// The ring round a star with a spectrum is the project's mark, not the sky's,
+// and "rings" takes it off -- that ring and nothing else: the star's disc and
+// its halo are still drawn. Read off the frame: the circles painted centred on
+// an observed star, with the switch on and off.
+{
+  // a question left standing by the blocks above isolates its own figure, and
+  // an isolated sky draws nothing else -- so this would count no circles at all
+  P.clearIsolate();
+  const s = P.STARS().find(t => !t.solar && t.vmag !== null && t.vmag < 0.5 && t.dir);
+  const wasObs = s.obs;
+  if (!s.obs) s.obs = {};
+  const was = { yaw: P.yaw, pitch: P.pitch, fov: P.fovDeg };
+  P.yaw2 = Math.atan2(s.dir[1], s.dir[0]); P.pitch2 = Math.asin(s.dir[2]); P.fovDeg2 = 70;
+  const circlesOn = () => {
+    ARCS.length = 0; P.draw();
+    const p = P.project(s.pos || s.dir.map(v => v * 100), P.camera());
+    return ARCS.filter(a => Math.hypot(a[0] - p.x, a[1] - p.y) < 0.01).length;
+  };
+  const btn = document.getElementById('tRings');
+  const on = circlesOn();
+  btn.onclick();
+  const off = circlesOn();
+  ok(!btn.classList.contains('on'), 'the rings button did not show itself off');
+  ok(on - off === 1 && off >= 1,
+     `rings off took ${on - off} circle(s) off ${s.name || 'the star'} (${on} -> ${off}); `
+     + 'it should take the one ring and leave the disc');
+  btn.onclick();
+  ok(btn.classList.contains('on') && circlesOn() === on, 'rings on did not put the ring back');
+  ok(/spectrum/.test(btn.title), `the rings button does not say what it does: "${btn.title}"`);
+  s.obs = wasObs;
+  P.yaw2 = was.yaw; P.pitch2 = was.pitch; P.fovDeg2 = was.fov;
+  console.log('  rings: the spectrum ring comes off on its own switch, and only it does');
 }
 
 // ============================================ the legend on a touch screen
