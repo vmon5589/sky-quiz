@@ -287,6 +287,10 @@ src += '\n;globalThis.__page = { build, resize, quizBoot, nextQuestion, answer, 
      + 'get rawMag() { return rawMag; }, get QUIZ_MARKS() { return QUIZ_MARKS; }, '
      + 'LEVELS, CATEGORIES, HEMIS, conHemi, levelPool, esc, '
      + 'REVIEW, REVIEW_GROUPS, REVIEW_KINDS, REVIEW_STARS_MAX, CON_SPLIT, '
+     + 'REVIEW_LEVELS, reviewTarget, PLANET_SEASONS, PLANET_BODIES, PLANET_TOL_DEG, '
+     + 'planetOn, planetsPossible, planetPieceAt, planetLon, planetRight, eclLB, STRIP, stripPx, '
+     + 'stripY, planetGrab, reframeForSheet, R0, ZODIAC, stripFigs, '
+     + 'lonDiff, mapCancel, get PLANET_DRAWN() { return PLANET_DRAWN; }, REVIEW_STARS_MEDIUM, REVIEW_HARD_MAG, reviewCons, reviewStarPool, '
      + 'SPEC_ORDER, CLASS_SHORT, CLASS_MARKS, displayType, conStars, '
      + 'figureComponents, conTargets, buildBoard, reviewPose, renderReview, '
      + 'reviewHit, reviewClick, checkBoard, setMode, reviewScore, reviewLabel, '
@@ -1866,6 +1870,190 @@ ok(P.QUIZ.best === 25, `best streak kept: ${P.QUIZ.best}`);
 
   console.log(`  review: ${P.REVIEW_GROUPS.length} groups × `
     + `${P.REVIEW_KINDS.length} boards played through`);
+}
+
+// ============================================ the star board's levels
+// Easy is the board it always was; medium is easy plus a few named stars from
+// every constellation on the wider board; hard is every figure star there. A
+// level is only worth having if it nests -- a harder board that DROPPED a star
+// the easier one asked for would be a different board, not a harder one --
+// and if every one of its names can actually be put down.
+{
+  const R = P.REVIEW;
+  const wasOn = R.on, wasKind = R.kind, wasGroup = R.group, wasLevel = R.level;
+  const INSET0 = P.SKY_INSET;
+  P.setMode(true);
+  const sizes = [];
+  const ids = s => new Set(s.map(x => x.id));
+  const allMore = new Set();
+  for (let g = 0; g < P.REVIEW_GROUPS.length; g++) {
+    const G = P.REVIEW_GROUPS[g];
+    ok(Array.isArray(G.more) && G.more.length > 0, `${G.id}: no outer ring for medium/hard`);
+    for (const a of G.more || []) {
+      ok(P.conStars(a).length > 0, `${G.id}: more names ${a}, which this catalogue does not draw`);
+      ok(!P.REVIEW_GROUPS.some(x => x.cons.includes(a)),
+         `${G.id}: ${a} is in a group's own constellations and its outer ring`);
+      ok(!allMore.has(a), `${a} is in two groups' outer rings`);
+      allMore.add(a);
+    }
+    R.group = g; R.kind = 'stars';
+    const pool = {};
+    for (const lv of P.REVIEW_LEVELS) pool[lv] = P.reviewStarPool(lv);
+
+    // easy is untouched: the twelve brightest proper names in the group alone
+    ok(pool.easy.length <= P.REVIEW_STARS_MAX && pool.easy.every(s => P.properName(s)),
+       `${G.id}/easy: ${pool.easy.length} stars, not the old board`);
+    ok(pool.easy.every(s => G.cons.some(a => P.conStars(a).includes(s))),
+       `${G.id}/easy: reached outside the group`);
+    // nesting
+    const em = ids(pool.medium), eh = ids(pool.hard);
+    ok(pool.easy.every(s => em.has(s.id)), `${G.id}: medium dropped an easy star`);
+    ok(pool.medium.every(s => eh.has(s.id)), `${G.id}: hard dropped a medium star`);
+    ok(pool.medium.length > pool.easy.length && pool.hard.length > pool.medium.length,
+       `${G.id}: levels do not grow — ${pool.easy.length}/${pool.medium.length}/${pool.hard.length}`);
+    // medium is the easy twelve topped up by MAGNITUDE: nothing hard asks
+    // about that medium left out is brighter than what medium took instead
+    ok(pool.medium.length === Math.min(P.REVIEW_STARS_MEDIUM, pool.hard.length),
+       `${G.id}/medium: ${pool.medium.length} stars, wanted ${P.REVIEW_STARS_MEDIUM}`);
+    {
+      const ez = ids(pool.easy);
+      const added = pool.medium.filter(s => !ez.has(s.id));
+      const faintest = Math.max(...added.map(s => s.vmag ?? 99));
+      const skipped = pool.hard.filter(s => !em.has(s.id) && (s.vmag ?? 99) < faintest);
+      ok(skipped.length === 0,
+         `${G.id}/medium: passed over brighter stars — `
+         + skipped.map(s => `${P.starName(s)} ${s.vmag}`).join(', ')
+         + ` (faintest taken ${faintest})`);
+    }
+    // and that is what puts the outer ring on the board: Auriga's and
+    // Draco's brightest are among the brightest of anything left
+    if (G.id === 'orion')
+      ok(pool.medium.some(s => P.properName(s) === 'Capella'), 'orion/medium: no Capella');
+    if (G.id === 'dipper')
+      ok(pool.medium.some(s => P.properName(s) === 'Eltanin'), 'dipper/medium: no Eltanin');
+    const cons = G.cons.concat(G.more);
+    // hard is every figure star with a name of either kind that the default
+    // sky draws -- and the default sky is what the slider opens at
+    const slider = /id="mag"[^>]*value="([\d.]+)"/.exec(html);
+    ok(slider && +slider[1] === P.REVIEW_HARD_MAG,
+       `hard stops at ${P.REVIEW_HARD_MAG} and the slider opens at ${slider && slider[1]}`);
+    for (const a of cons)
+      for (const s of P.conStars(a))
+        if ((P.properName(s) || /^[a-zA-Z\u03b1-\u03c9]+[⁰¹²³⁴⁵\d]* [A-Z]/.test(P.bayerName(s) || '')
+             || /^\d+ [A-Z]/.test(P.bayerName(s) || ''))
+            && !/^HD |^HR |^HIP /.test(P.bayerName(s) || '')
+            && (s.vmag ?? 0) <= P.REVIEW_HARD_MAG)
+          ok(eh.has(s.id), `${G.id}/hard: ${P.starName(s)} (${a}) left out`);
+    ok(pool.hard.every(s => (s.vmag ?? 0) <= P.REVIEW_HARD_MAG),
+       `${G.id}/hard: a star fainter than the default sky draws`);
+
+    for (const lv of ['medium', 'hard']) {
+      R.level = lv;
+      P.buildBoard(); P.reviewPose(); settle(); P.renderReview();
+      const tag = `${G.id}/stars/${lv}`;
+      const ts = R.targets;
+      sizes.push(`${G.id} ${lv} ${ts.length}`);
+      ok(ts.length === pool[lv].length, `${tag}: built ${ts.length} of ${pool[lv].length}`);
+      ok(new Set(ts.map(t => t.key)).size === ts.length, `${tag}: two targets share a key`);
+      ok(new Set(ts.map(t => t.label)).size === ts.length, `${tag}: two chips read the same`);
+      // the tray is an index, not a shuffle: proper names A to Z, then the
+      // designations by constellation, alpha before beta
+      {
+        const lab = R.chips.map(k => P.reviewLabel(k));
+        const isNamed = k => !!P.properName(P.reviewTarget(k).star);
+        const firstDesig = R.chips.findIndex(k => !isNamed(k));
+        ok(firstDesig < 0 || R.chips.slice(firstDesig).every(k => !isNamed(k)),
+           `${tag}: a proper name sits among the designations`);
+        // and the break between the two runs is said on the tray, before the
+        // first designation and nowhere else
+        const tray = P.reviewHTML();
+        const head = tray.indexOf('designations, by constellation');
+        if (firstDesig > 0) {
+          ok(tray.split('designations, by constellation').length === 2,
+             `${tag}: the designations heading is missing or doubled`);
+          const at = k => tray.indexOf(`data-chip="${P.esc(k)}"`);
+          ok(head > at(R.chips[firstDesig - 1]) && head < at(R.chips[firstDesig]),
+             `${tag}: the designations heading is not between the two runs`);
+        } else ok(head < 0, `${tag}: a designations heading over a tray with none`);
+        const names = lab.slice(0, firstDesig < 0 ? lab.length : firstDesig);
+        ok(names.every((n, i) => !i || names[i - 1].localeCompare(n, 'en', { sensitivity: 'base' }) <= 0),
+           `${tag}: the names are not A to Z — ${names.join(', ')}`);
+        const greek = Object.values(P.GREEK);
+        const desig = firstDesig < 0 ? [] : lab.slice(firstDesig);
+        for (let i = 1; i < desig.length; i++) {
+          const p = /^(\S+?)[⁰¹²³⁴⁵\d]* (.+)$/.exec(desig[i - 1]), q = /^(\S+?)[⁰¹²³⁴⁵\d]* (.+)$/.exec(desig[i]);
+          if (!p || !q) continue;
+          const c = p[2].localeCompare(q[2], 'en', { sensitivity: 'base' });
+          ok(c < 0 || (c === 0 && !(greek.includes(p[1]) && greek.includes(q[1])
+                                     && greek.indexOf(p[1]) > greek.indexOf(q[1]))),
+             `${tag}: ${desig[i - 1]} before ${desig[i]}`);
+        }
+      }
+      ok(ts.every(t => t.label && !/^[A-Za-z]?\*\s|^HD |^HIP |\d{3}/.test(t.label)),
+         `${tag}: a chip is a catalogue number — `
+         + ts.filter(t => !t.label || /^[A-Za-z]?\*\s|^HD |^HIP |\d{3}/.test(t.label))
+             .map(t => t.label).join(' | '));
+      const iso = [...(P.ISOLATE || [])].sort();
+      ok(iso.join(',') === cons.slice().sort().join(','), `${tag}: isolated ${iso.join(',')}`);
+      // the level buttons say how big each board is, for this group
+      const html = P.reviewHTML();
+      for (const k of P.REVIEW_LEVELS)
+        ok(html.includes(`data-rl="${k}" class="${k === lv ? 'on' : ''}">${k} <span class="d">${pool[k].length}</span>`),
+           `${tag}: the ${k} button is missing or miscounted`);
+
+      const seen = new Map(P.proj.map(q => [q.s, q]));
+      const on = q => q && q.x > 0 && q.x < P.W() && q.y > 0 && q.y < P.H();
+      ok(ts.every(t => on(seen.get(t.star))),
+         `${tag}: ${ts.filter(t => !on(seen.get(t.star))).length} targets off screen`);
+      let wrong = 0, eg = null;
+      for (const t of ts) {
+        const q = seen.get(t.star);
+        if (!on(q)) continue;
+        const got = P.reviewHit(q.x, q.y);
+        if (got !== t) { wrong++; eg = eg || `${t.label} -> ${got ? got.label : 'nothing'}`; }
+      }
+      ok(wrong === 0, `${tag}: ${wrong} clicks landed on the wrong name (e.g. ${eg})`);
+      for (const t of ts) {
+        const q = seen.get(t.star);
+        if (!q) continue;
+        R.sel = t.key; P.reviewClick(q.x, q.y);
+      }
+      P.checkBoard();
+      ok(P.reviewScore() === ts.length, `${tag}: played correctly and scored ${P.reviewScore()}/${ts.length}`);
+
+      // and clear of a half-height sheet on a phone
+      P.SKY_INSET = Math.round(P.H() * 0.52);
+      P.buildBoard(); P.reviewPose(); settle();
+      const seen2 = new Map(P.proj.map(q => [q.s, q]));
+      const under = R.targets.filter(t => { const q = seen2.get(t.star); return !q || q.y > P.H() - P.SKY_INSET; });
+      ok(under.length === 0, `${tag}: ${under.length} targets under a half-height sheet`);
+      P.SKY_INSET = INSET0;
+    }
+    R.level = 'easy';
+  }
+
+  // a level button rebuilds the board at that level and keeps the group
+  {
+    R.group = 2; R.kind = 'stars'; R.level = 'easy';
+    P.buildBoard(); P.reviewPose(); P.renderReview();
+    const btn = document.getElementById('review').querySelectorAll('[data-rl]')
+      .find(b => b.dataset.rl === 'medium');
+    ok(!!btn, 'no medium button on the star board');
+    if (btn) {
+      btn.onclick();
+      ok(R.level === 'medium' && R.group === 2, 'the medium button did not take');
+      ok(R.targets.some(t => t.label === 'Alfirk'),
+         'the Cassiopeia group at medium has no Alfirk');
+    }
+    R.kind = 'shapes'; P.buildBoard(); P.reviewPose(); P.renderReview();
+    ok(!/data-rl=/.test(P.reviewHTML()), 'the level buttons show on a shape board');
+    ok([...P.ISOLATE].length === P.REVIEW_GROUPS[2].cons.length,
+       'a shape board reached into the outer ring');
+  }
+
+  R.level = wasLevel; R.group = wasGroup; R.kind = wasKind;
+  P.buildBoard(); P.setMode(wasOn); settle();
+  console.log(`  levels: ${sizes.join(', ')}`);
 }
 
 
@@ -3486,6 +3674,283 @@ ok(P.QUIZ.best === 25, `best streak kept: ${P.QUIZ.best}`);
   console.log(`  planet: ${made} questions on `
     + (synthetic ? 'a synthetic ecliptic' : `the real ${PAYLOAD.ephemeris.year} ephemeris`)
     + ', each circle re-derived, and silent with no ephemeris');
+}
+
+// ============================================ the planet board
+// One planet at a time: its real path for a season, starting in another
+// planet's place on a chart of the unrolled zodiac, slid home by hand. Played
+// on the real ephemeris the static build baked -- docs/data.json -- because
+// the thing being checked is that the paths are the sky's own, and a
+// synthetic circle cannot be wrong in the ways a real retrograde loop can.
+{
+  const R = P.REVIEW;
+  const baked = path.join(HERE, 'docs', 'data.json');
+  const eph = fs.existsSync(baked) ? (JSON.parse(fs.readFileSync(baked, 'utf8')).ephemeris || {}) : {};
+  const have = eph.bodies && Object.keys(eph.bodies).length;
+  ok(!!have, 'planets: docs/data.json carries no ephemeris to play the board on');
+  if (have) {
+    const withE = JSON.parse(JSON.stringify(PAYLOAD));
+    withE.ephemeris = eph;
+    P.build(withE); P.resize(); P.quizBoot();
+    ok(P.planetsPossible(), 'planets: a real ephemeris and the board is not offered');
+    const mouse = (x, y) => ({ pointerId: 7, pointerType: 'mouse', button: 0,
+      clientX: x + P.CVX, clientY: y + P.CVY, preventDefault() {} });
+    const on = p => p.x > 0 && p.x < P.W() && p.y > 0 && p.y < P.visH();
+    const OB = 23.4393 * Math.PI / 180;
+    const lat = v => Math.asin(Math.max(-1, Math.min(1,
+      -v[1] * Math.sin(OB) + v[2] * Math.cos(OB)))) * 180 / Math.PI;
+    const uv = (ra, dec) => { const a = ra * Math.PI / 180, d = dec * Math.PI / 180;
+      return [Math.cos(d) * Math.cos(a), Math.cos(d) * Math.sin(a), Math.sin(d)]; };
+    const sep = (a, b) => Math.acos(Math.max(-1, Math.min(1,
+      a[0] * b[0] + a[1] * b[1] + a[2] * b[2]))) * 180 / Math.PI;
+    const gripOf = key => P.PLANET_DRAWN.filter(x => x.key === key).flatMap(x => [x.c, ...x.pts])
+      .find(p => on(p) && P.planetPieceAt(p.x, p.y) === key);
+    const pick = key => {
+      const b = document.getElementById('review').querySelectorAll('[data-planet]')
+        .find(x => x.dataset.planet === key);
+      if (b) b.onclick();
+      return !!b;
+    };
+    // slide one planet home the way a hand would: turn the chart to it, carry
+    // it as far as the screen allows, again
+    const playHome = (t, tag) => {
+      let n = 0;
+      for (let hop = 0; hop < 12 && !P.planetRight(t); hop++) {
+        // slide the chart under the planet first, as a thumb drags the black
+        // -- on a phone, after the first hop it is always at an edge. The
+        // drag itself is tested on its own above.
+        if (hop || P.W() < 600) P.STRIP.lon = R.plon.get(t.key);
+        settle();
+        let g = gripOf(t.key);
+        if (!g) { P.STRIP.lon = R.plon.get(t.key); settle(); g = gripOf(t.key); }
+        if (!g) break;
+        const dl = P.lonDiff(t.home, R.plon.get(t.key));
+        let to = null;
+        for (const f of [1, 0.75, 0.5, 0.3, 0.15])
+          for (const w of [0, 360, -360]) {
+            const x = g.x + (dl * f + (f === 1 ? w : 0)) * P.stripPx();
+            if (!to && x > 70 && x < P.W() - 70) to = { x, y: g.y };
+          }
+        if (!to) break;
+        P.fire('pointerdown', mouse(g.x, g.y));
+        ok(R.hold && R.hold.key === t.key, `${tag}: a press on ${t.label} picked up ${R.hold && R.hold.key}`);
+        if (!R.hold) break;
+        ok(!P.dragging, `${tag}: picking up ${t.label} also slid the chart`);
+        P.fire('pointermove', mouse((g.x + to.x) / 2, g.y));
+        P.fire('pointermove', mouse(to.x, to.y));
+        P.fire('pointerup', mouse(to.x, to.y));
+        ok(!R.hold, `${tag}: ${t.label} still held after letting go`);
+        n++;
+      }
+      return n;
+    };
+
+    const wasOn = R.on, wasKind = R.kind;
+    P.setMode(true);
+    R.kind = 'planets';
+    P.renderReview();
+    ok(/data-rk="planets"/.test(P.reviewHTML()), 'planets: no planets button with an ephemeris');
+    let drags = 0;
+    for (let q = 0; q < P.PLANET_SEASONS.length; q++) {
+      const se = P.PLANET_SEASONS[q], tag = `planets/${se.id}`;
+      R.planetSeason = q;
+      P.buildBoard(); P.reviewPose(); DRAWN.length = 0; ARCS.length = 0; settle(); P.renderReview();
+      const ts = R.targets;
+      ok(P.planetOn(), `${tag}: the board is not on`);
+      ok(ts.map(t => t.key).join() === P.PLANET_BODIES.join(),
+         `${tag}: pieces ${ts.map(t => t.key).join()}`);
+      ok(!ts.some(t => t.key === 'moon' || t.key === 'sun'), `${tag}: the Sun or the Moon is a piece`);
+      // the paths are the ephemeris's own rows, first day to last of the quarter
+      const y = eph.year;
+      const d0 = Math.round((new Date(y, se.m0, 1) - new Date(y, 0, 1)) / 864e5);
+      const d1 = Math.round((new Date(y, se.m1, 1) - new Date(y, 0, 1)) / 864e5) - 1;
+      for (const t of ts) {
+        const tr = eph.bodies[t.key];
+        ok(sep(t.path[0], uv(tr[d0][0], tr[d0][1])) < 1e-4
+           && sep(t.path[t.path.length - 1], uv(tr[d1][0], tr[d1][1])) < 1e-4,
+           `${tag}: ${t.label}'s path does not run ${d0}..${d1}`);
+        // the chart's latitude is the ecliptic's, and no planet strays far
+        ok(t.off.every(([, b], i) => Math.abs(b - lat(t.path[i])) < 1e-9),
+           `${tag}: ${t.label}'s chart latitude is not its ecliptic latitude`);
+        ok(t.off.every(([, b]) => Math.abs(b) < 9), `${tag}: ${t.label} wanders off the band`);
+        // and its longitude, independently
+        const v = t.path[0];
+        const lonI = (Math.atan2(v[1] * Math.cos(OB) + v[2] * Math.sin(OB), v[0]) * 180 / Math.PI + 360) % 360;
+        ok(Math.abs(P.lonDiff(P.eclLB(v)[0], lonI)) < 1e-9, `${tag}: eclLB's longitude is off`);
+        ok(!P.planetRight(t), `${tag}: ${t.label} dealt home`);
+      }
+      {
+        const st = eph.bodies.sun;
+        ok([0, 100, 200, 300].every(d => Math.abs(lat(uv(st[d][0], st[d][1]))) < 0.05),
+           `${tag}: the Sun is off this page's ecliptic`);
+      }
+      // the chart takes the frame, with the zodiac named on it
+      ok(P.proj.length === 0, `${tag}: the sky drew ${P.proj.length} stars under the chart`);
+      for (const a of P.ZODIAC)
+        ok(DRAWN.includes(P.conName(a)), `${tag}: ${P.conName(a)} is not named on the chart`);
+      // ...and only the zodiac: nothing a planet is never in
+      const zod = new Set(P.ZODIAC.map(a => P.conName(a)));
+      const others = Object.keys(P.CON_NAMES).map(a => P.conName(a))
+        .filter(n => !zod.has(n) && DRAWN.includes(n));
+      ok(!others.length, `${tag}: the chart also names ${others.join(', ')}`);
+      ok(P.stripFigs().segs.every(f => P.ZODIAC.includes(f.con)),
+         `${tag}: the chart draws a figure outside the zodiac`);
+      // stars the size the sky draws them at a wide field: no blobs
+      const bigStar = Math.max(...ARCS.map(a => a[2]));
+      ok(bigStar <= 6, `${tag}: a star on the chart is ${bigStar.toFixed(1)}px across the radius`);
+      // ONE planet on the chart: the one in hand, named, and nobody else
+      ok(R.psel === ts[0].key, `${tag}: opened holding ${R.psel}`);
+      ok(P.PLANET_DRAWN.length > 0 && P.PLANET_DRAWN.every(d => d.key === R.psel),
+         `${tag}: the chart drew ${[...new Set(P.PLANET_DRAWN.map(d => d.key))].join(',')}`);
+      ok(DRAWN.includes(ts[0].label) && !ts.slice(1).some(t => DRAWN.includes(t.label)),
+         `${tag}: another planet's name is on the chart`);
+      // whole on screen as it opens, on a desktop where the circle fits
+      ok(P.PLANET_DRAWN.some(d => d.pts.every(on)), `${tag}: the planet in hand opens cut by the seam`);
+      // the row in the panel: every planet, the one in hand marked
+      const html = P.reviewHTML();
+      ok(ts.every(t => html.includes(`data-planet="${t.key}"`)), `${tag}: a planet is missing from the row`);
+      ok(new RegExp(`class="sel" data-planet="${ts[0].key}"`).test(html), `${tag}: the planet in hand is not marked`);
+      ok(/check \(7 not moved\)/.test(html), `${tag}: the check does not count what has not been moved`);
+
+      // -- picking one swaps the chart over to it; so does its number key
+      ok(pick('mars'), `${tag}: no mars button`);
+      settle();
+      ok(R.psel === 'mars' && P.PLANET_DRAWN.every(d => d.key === 'mars'), `${tag}: picking Mars did not put it on the chart`);
+      global.window.dispatchEvent && null;
+      // -- a press on the black is not a piece, and slides the chart by
+      //    exactly the drag, without turning the sky behind it
+      {
+        let bx = null;
+        for (let gx = 200; gx < P.W() && bx === null; gx += 37)
+          if (!P.planetPieceAt(gx, P.H() - 10)) bx = gx;
+        const lon0 = P.STRIP.lon, yaw0 = P.yaw;
+        P.fire('pointerdown', mouse(bx, P.H() - 10));
+        ok(!R.hold && P.dragging, `${tag}: a press on the black picked something up`);
+        P.fire('pointermove', mouse(bx - 93, P.H() - 10));
+        P.fire('pointerup', mouse(bx - 93, P.H() - 10));
+        settle();
+        ok(Math.abs(P.lonDiff(P.STRIP.lon, lon0) - 93 / P.stripPx()) < 1e-9,
+           `${tag}: a 93px drag slid the chart ${P.lonDiff(P.STRIP.lon, lon0).toFixed(2)}°`);
+        ok(P.yaw === yaw0, `${tag}: sliding the chart turned the sky behind it`);
+      }
+
+      // -- every planet, picked and played home by hand
+      for (const t of ts) {
+        pick(t.key);
+        drags += playHome(t, tag);
+        ok(P.planetRight(t), `${tag}: could not slide ${t.label} home`);
+      }
+      P.renderReview();
+      ok(!/not moved/.test(P.reviewHTML()), `${tag}: every planet moved and the check still counts some`);
+      P.checkBoard(); P.renderReview();
+      ok(P.reviewScore() === ts.length, `${tag}: played home and scored ${P.reviewScore()}/${ts.length}`);
+      ok(/All \d+ where they were/.test(P.reviewHTML()), `${tag}: a clean sweep was not said`);
+      ok((P.reviewHTML().match(/class="right[^"]*" data-planet/g) || []).length === ts.length,
+         `${tag}: the row does not mark every planet right`);
+
+      // -- dealt and checked untouched: nothing is right, every miss says how far
+      P.buildBoard(); P.reviewPose(); settle();
+      P.checkBoard(); P.renderReview();
+      ok(P.reviewScore() === 0, `${tag}: ${P.reviewScore()} right without a move`);
+      ok((P.reviewHTML().match(/° too far (east|west)/g) || []).length === ts.length,
+         `${tag}: the misses do not each say how far off`);
+      ok(/id="rshow"/.test(P.reviewHTML()), `${tag}: no show me after a miss`);
+      // a checked board can still be looked through, one planet at a time
+      pick(ts[3].key); settle();
+      ok(R.psel === ts[3].key && P.PLANET_DRAWN.every(d => d.key === ts[3].key),
+         `${tag}: a checked board would not show ${ts[3].label}`);
+      ok(!P.planetGrab(gripOf(ts[3].key).x, gripOf(ts[3].key).y), `${tag}: a checked planet can be picked up`);
+      // "show me" glides every one home, and the grade stays what was earned
+      R.shown = true; settle();
+      ok(ts.every(t => Math.abs(P.lonDiff(P.planetLon(t.key, performance.now() + 1e4), t.home)) < 1e-6),
+         `${tag}: show me did not put the paths home`);
+      ok(P.reviewScore() === 0, `${tag}: show me changed the score`);
+    }
+
+    // -- a pinch while holding puts the piece back where it was put
+    {
+      R.planetSeason = 0; P.buildBoard(); P.reviewPose(); settle();
+      const t = R.targets[0];
+      const g = gripOf(t.key);
+      const was = R.plon.get(t.key);
+      P.fire('pointerdown', mouse(g.x, g.y));
+      ok(R.hold && R.hold.key === t.key, 'planets: could not pick up a piece to cancel');
+      P.fire('pointermove', mouse(g.x + 120, g.y));
+      P.mapCancel();
+      ok(!R.hold && R.plon.get(t.key) === was, 'planets: a cancelled drag moved the piece');
+      P.fire('pointerup', mouse(g.x + 120, g.y));
+    }
+
+    // -- a piece held at the edge slides the chart under it, and stays in hand
+    {
+      R.planetSeason = 1; P.buildBoard(); P.reviewPose(); settle();
+      const t = R.targets[0];
+      const g = gripOf(t.key);
+      P.fire('pointerdown', mouse(g.x, g.y));
+      P.fire('pointermove', mouse(P.W() - 3, g.y));
+      const lon0 = P.STRIP.lon, held0 = R.hold.lon;
+      P.mapTick(1000); P.mapTick(1040); P.mapTick(1080);
+      ok(P.lonDiff(P.STRIP.lon, lon0) > 1, 'planets: holding a piece at the right edge did not slide the chart');
+      ok(Math.abs(P.lonDiff(R.hold.lon, held0) - P.lonDiff(P.STRIP.lon, lon0)) < 1e-9,
+         'planets: the chart slid and the held piece did not go with it');
+      P.fire('pointerup', mouse(P.W() - 3, g.y));
+    }
+
+    // -- on a phone: 390 wide, the sheet at half height, a finger
+    {
+      const sky = document.getElementById('sky');
+      const was = { w: sky.clientWidth, h: sky.clientHeight, inset: P.SKY_INSET, phone: P.PHONE };
+      global.window.matchMedia = q => ({ matches: /pointer:\s*coarse/.test(q) });
+      sky.clientWidth = 390; sky.clientHeight = 844;
+      P.resize(); P.PHONE = true; P.SKY_INSET = Math.round(844 * 0.52);
+      let hops = 0;
+      for (let q = 0; q < P.PLANET_SEASONS.length; q++) {
+        const tag = `planets/phone/${P.PLANET_SEASONS[q].id}`;
+        R.planetSeason = q;
+        P.buildBoard(); P.reviewPose(); settle(); P.renderReview();
+        const ts = R.targets;
+        ok(P.stripPx() >= 3, `${tag}: the chart is ${P.stripPx().toFixed(2)}px a degree on a phone`);
+        // the chart sits in the part of the screen the sheet leaves
+        ok(Math.abs(P.stripY(0) - P.visH() / 2) < 1e-9, `${tag}: the ecliptic is not in the middle of the visible sky`);
+        for (const t of ts) {
+          pick(t.key); settle();
+          // picking a planet turns the chart to it
+          ok(P.PLANET_DRAWN.some(d => d.pts.some(on)), `${tag}: picked ${t.label} and it is not on screen`);
+          hops += playHome(t, tag);
+          ok(P.planetRight(t), `${tag}: a thumb could not bring ${t.label} home`);
+        }
+        // and the sheet moving re-frames on the planet in hand
+        P.SKY_INSET = Math.round(844 * 0.2);
+        P.STRIP.lon = (P.STRIP.lon + 150) % 360;
+        P.reframeForSheet(); settle();
+        ok(P.PLANET_DRAWN.some(d => d.pts.some(on)), `${tag}: the sheet moved and the planet in hand went off screen`);
+        P.SKY_INSET = Math.round(844 * 0.52);
+      }
+      sky.clientWidth = was.w; sky.clientHeight = was.h;
+      P.resize(); P.PHONE = was.phone; P.SKY_INSET = was.inset;
+      delete global.window.matchMedia;
+      console.log(`  planets on a phone: ${P.PLANET_SEASONS.length} seasons played home in ${hops} drags`);
+    }
+
+    // -- leaving the board puts the sky back
+    R.kind = 'shapes'; P.buildBoard(); P.reviewPose(); settle();
+    ok(!P.planetOn() && P.proj.length > 0, 'planets: the chart is still up on a shape board');
+    R.kind = 'planets'; P.buildBoard(); P.reviewPose(); settle();
+    P.setMode(false); settle();
+    ok(!P.planetOn() && P.proj.length > 0, 'planets: the chart is still up in the quiz');
+    console.log(`  planets: ${P.PLANET_SEASONS.length} seasons of the ${eph.year} ephemeris, one planet `
+      + `at a time, ${drags} drags to bring all ${P.PLANET_BODIES.length * P.PLANET_SEASONS.length} home`);
+    R.kind = wasKind === 'planets' ? 'shapes' : wasKind;
+    P.setMode(wasOn);
+  }
+  // and with no ephemeris the board is not offered at all
+  const none = JSON.parse(JSON.stringify(PAYLOAD));
+  none.ephemeris = { year: new Date().getFullYear(), bodies: {} };
+  P.build(none); P.resize(); P.quizBoot();
+  ok(!P.planetsPossible(), 'planets: offered with no ephemeris');
+  const was = R.on; P.setMode(true); P.renderReview();
+  ok(!/data-rk="planets"/.test(P.reviewHTML()), 'planets: the button shows with no ephemeris');
+  P.setMode(was);
 }
 
 // ============================================ the static build
