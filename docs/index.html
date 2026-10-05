@@ -346,6 +346,10 @@
         color: var(--text); }
   #review .tray button .n { color: var(--dim); font-size: .68rem; }
   #review .tray button .d { color: var(--dim); font-size: .72rem; }
+  #review .tray button .dot { display: inline-block; width: 8px; height: 8px;
+        border-radius: 50%; margin-right: 6px; vertical-align: 1px; }
+  #review .tray .sub { flex-basis: 100%; font-size: .7rem; color: var(--dim);
+        margin: 4px 0 -1px; }
 
   #review .off { margin: 9px 0 0; font-size: .74rem; color: var(--warn);
         line-height: 1.4; }
@@ -1399,6 +1403,8 @@ function draw() {
   // The star map is a black table with the pieces on it, not a sky, so it
   // takes the whole frame. See drawMap().
   if (mapOn()) { proj = []; drawMap(cam, now); return; }
+  // ...and so does the planet chart. See drawPlanets().
+  if (planetOn()) { proj = []; drawPlanets(cam, now); return; }
 
   // --- constellation figures, behind the stars
   const at = new Map();
@@ -2295,7 +2301,7 @@ cv.addEventListener('pointerdown', e => {
   if (TOUCHES.size >= 2) { dragging = false; return; }
   // On the star map a finger on a piece picks the piece up, and a finger on
   // the black between them turns the sky as it always has.
-  if (mapGrab(ex(e), ey(e))) {
+  if (mapGrab(ex(e), ey(e)) || planetGrab(ex(e), ey(e))) {
     dragging = false; moved = 0; vx = vy = 0; TWEEN = null;
     cv.classList.add('drag'); cv.setPointerCapture(e.pointerId);
     return;
@@ -2306,7 +2312,7 @@ cv.addEventListener('pointerdown', e => {
 });
 cv.addEventListener('pointerup', e => {
   dragging = false; cv.classList.remove('drag');
-  if (REVIEW.hold) { mapDrop(); return; }
+  if (REVIEW.hold) { if (REVIEW.hold.planets) planetDrop(); else mapDrop(); return; }
   // Coming out of a pinch, neither finger is a tap. Both lift having barely
   // moved, so `moved` is under the threshold for each -- which would open the
   // detail panel, or put a name down on a review board, at the end of every
@@ -2325,12 +2331,17 @@ cv.addEventListener('pointerup', e => {
 });
 cv.addEventListener('pointermove', e => {
   if (TOUCHES.size >= 2) return;        // a pinch, and the pinch handler has it
-  if (REVIEW.hold) { mapMove(ex(e), ey(e)); return; }
+  if (REVIEW.hold) {
+    if (REVIEW.hold.planets) planetMove(ex(e), ey(e)); else mapMove(ex(e), ey(e));
+    return;
+  }
   if (mapOn()) cv.style.cursor = !REVIEW.checked && mapPieceAt(ex(e), ey(e)) ? 'move' : '';
+  if (planetOn()) cv.style.cursor = !REVIEW.checked && planetPieceAt(ex(e), ey(e)) ? 'move' : '';
   if (dragging) {
     const dx = e.clientX - lx, dy = e.clientY - ly;
     moved += Math.abs(dx) + Math.abs(dy);
     lx = e.clientX; ly = e.clientY;
+    if (planetOn()) { stripPan(dx); vx = vy = 0; tip.style.display = 'none'; return; }
     if (asSeen) { grab(ex(e) - dx, ey(e) - dy, ex(e), ey(e)); glideAt = [ex(e), ey(e)]; }
     else turn(dx, dy);
     vx = dx; vy = dy;                       // for the glide after release
@@ -5741,15 +5752,26 @@ function renderQuiz() {
 // and its neighbours, star-hopped from it. They are written down because
 // "which constellations are learnt together" is a fact about teaching rather
 // than about the sky, and nothing in the catalogue knows it.
+//
+// `more` is the next ring out from each group, and only the star board at
+// medium and hard reaches for it: the dimmer figures that sit between the
+// groups -- Draco round the pole, Auriga over Orion's head, Hercules between
+// Bootes and Lyra -- which an easy board of the twelve brightest never gets
+// down to. Each is added to the group it is star-hopped FROM, so a board is
+// still one continuous stretch of sky.
 const REVIEW_GROUPS = [
   { id: 'dipper', label: 'Big Dipper → Leo',
-    cons: ['UMa', 'Boo', 'CrB', 'UMi', 'Leo', 'CVn'] },
+    cons: ['UMa', 'Boo', 'CrB', 'UMi', 'Leo', 'CVn'],
+    more: ['Dra', 'LMi', 'Com'] },
   { id: 'orion', label: 'Orion → the Pleiades',
-    cons: ['Ori', 'Tau', 'Gem', 'CMa', 'CMi'] },
+    cons: ['Ori', 'Tau', 'Gem', 'CMa', 'CMi'],
+    more: ['Aur', 'Lep', 'Mon'] },
   { id: 'cas', label: 'Cassiopeia → Aries',
-    cons: ['Cas', 'Cep', 'Per', 'And', 'Peg', 'Ari'] },
+    cons: ['Cas', 'Cep', 'Per', 'And', 'Peg', 'Ari'],
+    more: ['Lac', 'Tri', 'Cam'] },
   { id: 'cygnus', label: 'Cygnus → Serpens Caput',
-    cons: ['Cyg', 'Lyr', 'Aql', 'Oph', 'Ser'] },
+    cons: ['Cyg', 'Lyr', 'Aql', 'Oph', 'Ser'],
+    more: ['Her', 'Del', 'Sge', 'Vul', 'Equ', 'Sct'] },
 ];
 
 // Serpens is ONE figure in the catalogue and two constellations on the sky:
@@ -5831,18 +5853,47 @@ function conTargets(abbr) {
 // knowing, and the ones you can actually pick out.
 const REVIEW_STARS_MAX = 12;
 
+// The star board's three levels, which deliberately nest:
+//
+//   easy    the twelve brightest proper names in the group, as it always was
+//   medium  those same twelve, topped up to REVIEW_STARS_MEDIUM with the
+//           brightest of what hard would ask -- by magnitude and nothing
+//           else, so the wider board's bright stars come in (Capella,
+//           Eltanin, Kornephoros) and its faint ones wait for hard
+//   hard    every figure star on the wider board. Where a star has no proper
+//           name its chip is its designation -- zeta Cephei -- and at this
+//           level that is the point: Monoceros and Camelopardalis have no
+//           named stars at all, and the Bayer letters are how a chart
+//           tells you which star of a figure is which.
+//
+// Only the star board has levels. A shape board is a fixed set of figures,
+// and the map is played in pairs of groups that are already half the sky.
+const REVIEW_LEVELS = ['easy', 'medium', 'hard'];
+const REVIEW_STARS_MEDIUM = 30;
+// Hard stops where the default sky does: the magnitude slider opens at 5.0,
+// and a target fainter than that is not drawn, so it could never be clicked.
+// Raising the slider is a choice about the sky, not about the board, so the
+// board does not follow it.
+const REVIEW_HARD_MAG = 5.0;
+
 const REVIEW_KINDS = [
   { id: 'shapes', label: 'shapes' },
   { id: 'stars', label: 'star names' },
   { id: 'spectra', label: 'spectra' },
   { id: 'map', label: 'star map' },
+  { id: 'planets', label: 'planets' },
 ];
 
 const REVIEW = {
   on: false,
   group: 0,
   mapGroup: 0,          // the star map's own: an index into MAP_GROUPS
+  planetSeason: 0,      // the planet board's: an index into PLANET_SEASONS
+  psel: null,           // the planet in hand
+  moved: new Set(),     // the planets that have been moved off where they were dealt
+  plon: new Map(),      // planet key -> the ecliptic longitude it is put at
   kind: 'shapes',
+  level: 'easy',        // the star board's: see REVIEW_LEVELS
   targets: [],          // {key, label, stars, dir, star?}
   chips: [],            // the same keys, shuffled: the tray's order
   place: new Map(),     // target key -> the chip key put on it
@@ -5887,6 +5938,63 @@ function reviewGroup() {
   if (REVIEW.kind === 'map') return mapGroup();
   return REVIEW_GROUPS[REVIEW.group] || REVIEW_GROUPS[0];
 }
+// The constellations a board is played over: the group, and on a star board
+// above easy its outer ring too. Everything that decides what is ON the sky
+// -- the isolate, the ring of neighbours -- reads this rather than g.cons.
+function reviewCons(level) {
+  const g = reviewGroup();
+  const lv = level || REVIEW.level;
+  return REVIEW.kind === 'stars' && lv !== 'easy' && g.more
+    ? g.cons.concat(g.more) : g.cons;
+}
+
+// The stars a star board asks about, at a level. A function of its own so the
+// level buttons can say how many each one is before it is chosen.
+function reviewStarPool(level) {
+  const g = reviewGroup();
+  const bright = (x, y) => (x.vmag ?? 99) - (y.vmag ?? 99);
+  // Proper names only, below hard. Placing "Alioth" and "Mizar" is the
+  // exercise; placing "upsilon Bootis" is transcription, and the Bayer name
+  // is what the answer TEACHES rather than what it asks for.
+  const named = cons => {
+    const seen = new Set(), out = [];
+    for (const a of cons)
+      for (const s of conStars(a)) {
+        if (!properName(s) || seen.has(s)) continue;
+        seen.add(s);
+        out.push(s);
+      }
+    return out.sort(bright);
+  };
+  const easy = named(g.cons).slice(0, REVIEW_STARS_MAX);
+  if (level === 'easy') return easy;
+  if (level === 'medium') {
+    const have = new Set(easy);
+    const rest = reviewStarPool('hard').filter(s => !have.has(s));
+    return easy.concat(rest.slice(0, REVIEW_STARS_MEDIUM - easy.length)).sort(bright);
+  }
+  const cons = reviewCons(level);
+  // hard: everything that can be called something other than a catalogue
+  // number. bayerName() will spell `HD 50896` as if HD were a constellation,
+  // so a designation only counts when it really ends in a genitive. A figure
+  // star is shared between two figures now and then, so it is taken once.
+  const gens = Object.values(CON_GEN);
+  const designated = s => {
+    const b = bayerName(s);
+    const bare = (b || '').replace(/ [A-E]$/, '');   // mu Orionis A
+    return !!b && gens.some(x => bare.endsWith(' ' + x));
+  };
+  const seen = new Set(), out = [];
+  for (const a of cons)
+    for (const s of conStars(a)) {
+      if (seen.has(s) || (s.vmag ?? 0) > REVIEW_HARD_MAG) continue;
+      if (!(properName(s) || designated(s))) continue;
+      seen.add(s);
+      out.push(s);
+    }
+  return out.sort(bright);
+}
+
 function reviewTarget(key) { return REVIEW.targets.find(t => t.key === key); }
 function reviewLabel(key) { const t = reviewTarget(key); return t ? t.label : key; }
 // The designation under a name, on a star board. A shape has none, and a
@@ -5909,20 +6017,11 @@ function buildBoard() {
     REVIEW.sel = null; REVIEW.checked = false; REVIEW.shown = false;
     return;
   }
+  if (REVIEW.kind === 'planets') { buildPlanets(); return; }
   if (REVIEW.kind === 'stars') {
-    // Proper names only. Placing "Alioth" and "Mizar" is the exercise;
-    // placing "upsilon Bootis" is transcription, and the Bayer name is what
-    // the answer TEACHES rather than what it asks for.
-    const seen = new Set();
-    for (const a of g.cons)
-      for (const s of conStars(a)) {
-        if (!properName(s) || seen.has(s)) continue;
-        seen.add(s);
-        ts.push(s);
-      }
-    ts = ts.sort((x, y) => (x.vmag ?? 99) - (y.vmag ?? 99))
-           .slice(0, REVIEW_STARS_MAX)
-           .map(s => withDir({ key: s.id, label: properName(s), stars: [s], star: s }));
+    ts = reviewStarPool(REVIEW.level)
+      .map(s => withDir({ key: s.id, label: properName(s) || bayerName(s),
+                          stars: [s], star: s }));
   } else {
     for (const a of g.cons) ts.push(...conTargets(a));
   }
@@ -5931,13 +6030,44 @@ function buildBoard() {
   REVIEW.order = ts.map(t => t.key);
   if (REVIEW.kind === 'map') { dealMap(); return; }
   // Shuffled, and shuffled ONCE: a tray listed in the order the targets were
-  // built is a tray listed west to east, which answers the board.
-  REVIEW.chips = shuffle(ts.map(t => t.key));
+  // built is a tray listed west to east, which answers the board. A star
+  // board past a dozen names is sorted instead -- see trayOrder().
+  REVIEW.chips = REVIEW.kind === 'stars' && REVIEW.level !== 'easy'
+    ? trayOrder(ts) : shuffle(ts.map(t => t.key));
   REVIEW.place = new Map();
   REVIEW.sel = REVIEW.chips[0] || null;
   REVIEW.checked = false;
   REVIEW.shown = false;
   REVIEW.offFrame = REVIEW.dimmed = 0;
+}
+
+// A tray of thirty or ninety names is not one you can scan, and a shuffled
+// one turns every placement into a hunt through the tray rather than the sky.
+// Alphabetical gives nothing away -- what the shuffle guards against is order
+// that follows the SKY -- so the bigger star boards are sorted the way an
+// index is: proper names A to Z, then the designations grouped by
+// constellation in Bayer's own order, alpha before beta, Latin letters after
+// the Greek, Flamsteed numbers last.
+const GREEK_ORDER = Object.values(GREEK);
+function trayKey(t) {
+  if (properName(t.star)) return [0, t.label, 0, 0];
+  const m = /^(\S+?)([⁰¹²³⁴⁵\d]*) (.+)$/.exec(t.label) || [null, t.label, '', ''];
+  const sup = parseInt(m[2].replace(/[⁰¹²³⁴⁵]/g, c => '⁰¹²³⁴⁵'.indexOf(c)), 10) || 0;
+  const gi = GREEK_ORDER.indexOf(m[1]);
+  const rank = gi >= 0 ? gi
+    : /^\d+$/.test(m[1]) ? 1000 + parseInt(m[1], 10)
+    : 100 + m[1].charCodeAt(0);
+  return [1, m[3], rank, sup];
+}
+function trayOrder(ts) {
+  const cmp = (a, b) => typeof a === 'number' ? a - b
+    : a.localeCompare(b, 'en', { sensitivity: 'base' });
+  return ts.map(t => [t.key, trayKey(t)])
+    .sort((x, y) => {
+      for (let i = 0; i < 4; i++) { const c = cmp(x[1][i], y[1][i]); if (c) return c; }
+      return 0;
+    })
+    .map(x => x[0]);
 }
 
 // The sky a board poses on. quizSky() is the same reset a question starts
@@ -5964,6 +6094,9 @@ function reviewPose() {
   quizSky();
   setLabels(false);
   if (REVIEW.kind === 'spectra') { clearIsolate(); return; }
+  // The planets are played on a chart of their own -- see drawPlanets() --
+  // with the zodiac drawn into it, and no bodies.
+  if (REVIEW.kind === 'planets') { clearIsolate(); framePlanets(); return; }
   // A piece is dragged by unprojecting the finger, and unproject() is the
   // view from the Earth. Stepped back, the sky under a finger and the sky
   // drawn there part company, and a piece would slide away from the hand
@@ -6069,8 +6202,8 @@ function reviewNeighbours(cons) {
 }
 
 function reviewIsolate() {
-  const g = reviewGroup();
-  isolate(g.cons, REVIEW.near ? reviewNeighbours(g.cons) : null);
+  const cons = reviewCons();
+  isolate(cons, REVIEW.near ? reviewNeighbours(cons) : null);
 }
 
 // ---- putting a name down -------------------------------------------------
@@ -6125,6 +6258,7 @@ function nextLoose(from) {
 }
 
 function reviewScore() {
+  if (REVIEW.kind === 'planets') return REVIEW.targets.filter(planetRight).length;
   let right = 0;
   for (const t of REVIEW.targets) if (REVIEW.place.get(t.key) === t.key) right++;
   return right;
@@ -6154,7 +6288,8 @@ function reviewLabelAt(t, at) {
 }
 
 function drawReviewLabels(at) {
-  if (!REVIEW.on || REVIEW.kind === 'spectra' || !REVIEW.targets.length) return;
+  if (!REVIEW.on || REVIEW.kind === 'spectra' || REVIEW.kind === 'planets'
+      || !REVIEW.targets.length) return;
   cx2.save();
   // The ring is drawn off `proj` and NOT off `at`, and the difference is the
   // whole of a bug worth keeping a comment about.
@@ -6640,13 +6775,18 @@ function mapMove(px, py) {
 // readout going stale, the pole staying put -- follows from turn().
 function mapTick(now) {
   const h = REVIEW.hold;
-  if (!h || !mapOn()) { MAP_TICK = null; return; }
+  if (!h || !(h.planets ? planetOn() : mapOn())) { MAP_TICK = null; return; }
   now = now ?? performance.now();
   const dt = MAP_TICK === null ? 0 : Math.min(0.05, (now - MAP_TICK) / 1000);
   MAP_TICK = now;
   const e = MAP_EDGE();
   const into = h.x < e ? (e - h.x) / e : h.x > W - e ? -(h.x - (W - e)) / e : 0;
   if (!into || !dt) return;
+  if (h.planets) {
+    stripPan(MAP_TURN * dt * Math.max(-1, Math.min(1, into)));
+    planetFollow();
+    return;
+  }
   turn(MAP_TURN * dt * Math.max(-1, Math.min(1, into)), 0);
   seasonOut.classList.add('stale');
   mapFollow();
@@ -6682,6 +6822,8 @@ function mapCancel() {
   const h = REVIEW.hold;
   if (!h) return;
   REVIEW.hold = null; MAP_TICK = null;
+  // a planet path goes back to where it was put; nothing moved, so no glide
+  if (h.planets) return;
   REVIEW.anim.set(h.key, { from: h.dir, t0: performance.now() });
 }
 
@@ -6724,6 +6866,422 @@ function mapPanelHTML() {
   return h;
 }
 
+// ---- the planets -----------------------------------------------------------
+// The `planet` question asks where a body is on one night, and that is hard
+// because it is one sample of something that MOVES: a planet is not anywhere
+// in particular, it is somewhere on a path that season. So this board hands
+// back the paths. A season of each planet's real track -- retrograde loops and
+// all -- starts in another planet's place, and the job is to slide each one
+// home.
+//
+// ONE PLANET AT A TIME. Pick it from the row in the panel and only its path is
+// on the chart. Played all at once, the paths are not a puzzle, they are a
+// knot: Mercury, Venus and Mars spend the first quarter of 2026 inside twenty
+// degrees of each other, and Saturn and Neptune all year inside five.
+//
+// On a CHART, not on the sky. The planets of one season can be spread two
+// thirds of the way round the ecliptic, and a sphere opened that wide is a
+// fisheye that stretches every figure toward its rim. So the ecliptic is
+// unrolled, the way an almanac prints a year of planets: longitude across,
+// latitude up, the zodiac figures drawn into it at their true ecliptic
+// coordinates. Close to the line -- which is where everything here is -- that
+// is very nearly the sky's own shapes. And since a planet never strays more
+// than a few degrees off the line, where one is, is how far ALONG: a piece
+// only ever slides sideways.
+//
+// Graded by distance, within PLANET_TOL_DEG of its true middle.
+//
+// Not the Moon -- it laps the sky three times a season, so its season is a
+// ring and has no place to put. Not the Sun -- Mercury and Venus never leave
+// it, and the question never asks for it.
+const PLANET_SEASONS = [
+  { id: 'q1', label: 'Jan – Mar', m0: 0, m1: 3 },
+  { id: 'q2', label: 'Apr – Jun', m0: 3, m1: 6 },
+  { id: 'q3', label: 'Jul – Sep', m0: 6, m1: 9 },
+  { id: 'q4', label: 'Oct – Dec', m0: 9, m1: 12 },
+];
+const PLANET_BODIES = ['mercury', 'venus', 'mars', 'jupiter', 'saturn', 'uranus', 'neptune'];
+// the eye's colour for each, close to how it looks in a small telescope
+const PLANET_INK = {
+  mercury: '#c9c2b6', venus: '#f6ecc0', mars: '#ff7b54', jupiter: '#e9c49f',
+  saturn: '#dcc57c', uranus: '#8fe0ea', neptune: '#7d97ff',
+};
+const PLANET_TOL_DEG = 12;   // a path within this of home is home: under half a zodiac figure
+const PLANET_STEP = 2;       // days between the points a path is drawn through
+const STRIP_PX_DEG = 3.1;    // the chart's scale: all 360 degrees on a desktop
+const STRIP_LAT = 42;        // how far off the ecliptic a figure star may be and still be drawn
+// The stars are sized as the sky sizes them at a field this wide, which is
+// about what 3 px a degree is on the sphere: small, so a figure reads as
+// points and lines rather than as a row of discs.
+const STRIP_STAR_FOV = 200;
+const OBLIQ = 23.4393 * Math.PI / 180;
+// The only figures on the chart: the ones a planet is ever in front of -- the
+// twelve, and Ophiuchus, whose feet the ecliptic crosses for longer than it
+// crosses Scorpius. Everything else near the line (Orion, Cetus, Pegasus) is
+// a figure no planet's answer is ever in, and drawn it was clutter. Written
+// down because "the zodiac" is a fact about history, not about the catalogue.
+const ZODIAC = ['Psc', 'Ari', 'Tau', 'Gem', 'Cnc', 'Leo', 'Vir', 'Lib', 'Sco', 'Oph', 'Sgr', 'Cap', 'Aqr'];
+
+// ecliptic longitude and latitude, in degrees
+function eclLB(v) {
+  const y = v[1] * Math.cos(OBLIQ) + v[2] * Math.sin(OBLIQ);
+  const z = -v[1] * Math.sin(OBLIQ) + v[2] * Math.cos(OBLIQ);
+  return [(Math.atan2(y, v[0]) * 180 / Math.PI + 360) % 360,
+          Math.asin(Math.max(-1, Math.min(1, z))) * 180 / Math.PI];
+}
+// signed, the short way round: +east
+function lonDiff(a, b) { return ((a - b + 540) % 360) - 180; }
+
+function planetOn() { return REVIEW.on && REVIEW.kind === 'planets' && REVIEW.targets.length > 0; }
+// The board needs a year of track for each body; a payload with no ephemeris
+// has nothing to deal and the kind is not offered.
+function planetsPossible() {
+  return PLANET_BODIES.filter(id => SOLAR_SKY.some(b => b.id === id && b.track
+    && b.track.length > 300)).length >= 4;
+}
+function planetSeason() { return PLANET_SEASONS[REVIEW.planetSeason] || PLANET_SEASONS[0]; }
+
+// The chart's own view: the longitude at the middle of the screen. Panned by
+// a drag on the black, never zoomed.
+const STRIP = { lon: 0 };
+function stripPx() { return Math.max(STRIP_PX_DEG, W / 360); }
+function stripX(lon) { return ox0() + lonDiff(lon, STRIP.lon) * stripPx(); }
+function stripY(lat) { return oy0() - lat * stripPx(); }
+function stripLon(x) { return (STRIP.lon + (x - ox0()) / stripPx() + 360) % 360; }
+// Everything is drawn at its x and at x one lap either side, so a figure or a
+// path straddling the seam is whole on both edges.
+function stripLap() { return 360 * stripPx(); }
+function stripPan(dx) { STRIP.lon = (STRIP.lon - dx / stripPx() + 360) % 360; }
+
+function buildPlanets() {
+  const se = planetSeason();
+  // Day numbers off the calendar rather than off 30-day months, so a leap year
+  // puts April where April is. Row 0 of a track is 1 January.
+  const dayOf = m => Math.round((new Date(SEASON_YEAR, m, 1) - new Date(SEASON_YEAR, 0, 1)) / 86400000);
+  const d0 = dayOf(se.m0), d1 = dayOf(se.m1) - 1;
+  const ts = [];
+  for (const id of PLANET_BODIES) {
+    const b = SOLAR_SKY.find(x => x.id === id);
+    if (!b || !b.track || b.track.length <= d1) continue;
+    const days = [];
+    for (let d = d0; d <= d1; d += PLANET_STEP) days.push(d);
+    if (days[days.length - 1] !== d1) days.push(d1);
+    const path = days.map(d => unitVec(b.track[d][0], b.track[d][1]));
+    const lb = path.map(eclLB);
+    // home is the circular mean of the path's longitudes: Mercury's loop
+    // doubles back over itself, and its middle day is not its middle
+    let sx = 0, sy = 0;
+    for (const [l] of lb) { sx += Math.cos(l * Math.PI / 180); sy += Math.sin(l * Math.PI / 180); }
+    const home = (Math.atan2(sy, sx) * 180 / Math.PI + 360) % 360;
+    // kept as offsets from home, unwrapped, so a path that crosses 0 degrees
+    // is one line and not two
+    const off = lb.map(([l, b2]) => [lonDiff(l, home), b2]);
+    ts.push({ key: id, label: b.label, body: b, path, off, home, stars: [], dir: path[0] });
+  }
+  REVIEW.targets = ts;
+  REVIEW.chips = ts.map(t => t.key);
+  REVIEW.order = ts.map(t => t.key);
+  REVIEW.place = new Map();
+  REVIEW.anim = new Map(); REVIEW.hold = null;
+  REVIEW.sel = null; REVIEW.checked = false; REVIEW.shown = false;
+  REVIEW.offFrame = REVIEW.dimmed = 0;
+  REVIEW.moved = new Set();
+  REVIEW.psel = ts.length ? ts[0].key : null;
+  dealPlanets();
+}
+
+// Each path starts in another's place, and never within reach of its own: a
+// piece dealt home is a piece handed over. Where two bodies share a place --
+// Saturn and Neptune -- a straight swap would leave both at home, so the deal
+// keeps shuffling, and in the end slides the piece clear of home by hand.
+function dealPlanets() {
+  const ts = REVIEW.targets, homes = ts.map(t => t.home);
+  const far = (t, lon) => Math.abs(lonDiff(lon, t.home)) > PLANET_TOL_DEG * 1.5;
+  let best = null;
+  for (let i = 0; i < 200 && ts.length > 1; i++) {
+    const p = shuffle(homes);
+    const bad = ts.filter((t, j) => !far(t, p[j])).length;
+    if (!best || bad < best.bad) best = { p, bad };
+    if (!bad) break;
+  }
+  REVIEW.plon = new Map();
+  ts.forEach((t, j) => {
+    let lon = best ? best.p[j] : t.home;
+    if (!far(t, lon)) lon = (t.home + PLANET_TOL_DEG * 2.5 * (j % 2 ? 1 : -1) + 360) % 360;
+    REVIEW.plon.set(t.key, lon);
+  });
+}
+
+// The chart opens on the piece in hand: centred on it where the whole circle
+// does not fit -- a phone -- and, where it does, with the seam as far from it
+// and from its home as it can be, so that neither starts cut in half.
+function framePlanets() {
+  const t = reviewTarget(REVIEW.psel);
+  if (!t) return;
+  const at = planetLon(t.key, performance.now());
+  if (stripLap() > W) { STRIP.lon = at; return; }
+  const keep = [at, t.home];
+  let best = 0, bd = -1;
+  for (let c = 0; c < 360; c += 5) {
+    const seam = (c + 180) % 360;
+    const d = Math.min(...keep.map(l => Math.abs(lonDiff(l, seam))));
+    if (d > bd) { bd = d; best = c; }
+  }
+  STRIP.lon = best;
+}
+
+// Where a piece is drawn now, in longitude: held, gliding home, or put down.
+function planetLon(key, now) {
+  const t = reviewTarget(key);
+  const h = REVIEW.hold;
+  if (h && h.key === key) return h.lon;
+  const to = REVIEW.shown ? t.home : REVIEW.plon.get(key);
+  const an = REVIEW.anim.get(key);
+  if (!an) return to;
+  const u = Math.min(1, (now - an.t0) / MAP_GLIDE_MS);
+  if (u >= 1) { REVIEW.anim.delete(key); return to; }
+  const e = 1 - Math.pow(1 - u, 3);
+  return (an.from + lonDiff(to, an.from) * e + 360) % 360;
+}
+function planetRight(t) {
+  return Math.abs(lonDiff(REVIEW.plon.get(t.key), t.home)) <= PLANET_TOL_DEG;
+}
+// Pick a planet: it becomes the one on the chart, and the chart turns to it
+// if it is off the edge.
+function selectPlanet(key) {
+  if (!reviewTarget(key) || REVIEW.hold) return;
+  REVIEW.psel = key;
+  const x = stripX(planetLon(key, performance.now()));
+  if (x < 40 || x > W - 40) framePlanets();
+  renderReview();
+}
+
+// The zodiac's figures, in chart coordinates, worked out once per catalogue.
+let STRIP_FIGS = null;
+function stripFigs() {
+  if (STRIP_FIGS && STRIP_FIGS.n === STARS.length) return STRIP_FIGS;
+  const lb = new Map();
+  const of = s => { if (!lb.has(s)) lb.set(s, eclLB(s.dir)); return lb.get(s); };
+  const cons = new Set(ZODIAC);
+  const segs = FIGS.filter(f => cons.has(f.con)
+    && Math.abs(of(f.a)[1]) < STRIP_LAT && Math.abs(of(f.b)[1]) < STRIP_LAT);
+  const stars = new Set();
+  for (const f of segs) { stars.add(f.a); stars.add(f.b); }
+  // a caption under the middle of each figure, unwrapped about its first star
+  const caps = [];
+  for (const a of cons) {
+    const st = new Set();
+    for (const f of segs) if (f.con === a) { st.add(f.a); st.add(f.b); }
+    if (!st.size) continue;
+    const list = [...st], l0 = of(list[0])[0];
+    let dl = 0, lo = Infinity;
+    for (const s of list) { dl += lonDiff(of(s)[0], l0); lo = Math.min(lo, of(s)[1]); }
+    caps.push({ con: a, lon: (l0 + dl / list.length + 360) % 360, lat: lo });
+  }
+  return (STRIP_FIGS = { n: STARS.length, segs, stars: [...stars], caps, lb: of });
+}
+// The sky's own star size at the chart's equivalent field: sizeOf() at the
+// sphere's radius, with its field scaling swapped for STRIP_STAR_FOV's.
+function stripStarR(s) {
+  const fs = f => Math.min(1.5, Math.max(0.55, Math.pow(60 / f, 0.35)));
+  return Math.max(0.7, sizeOf(s, R0) * fs(STRIP_STAR_FOV) / fs(fovDeg));
+}
+
+let PLANET_DRAWN = [];
+function drawPlanets(cam, now) {
+  PLANET_DRAWN = [];
+  const lap = stripLap();
+  const F = stripFigs();
+  const xs = x => [x - lap, x, x + lap].filter(v => v > -60 && v < W + 60);
+
+  // the band the planets keep to, and the ecliptic down its middle
+  cx2.fillStyle = 'rgba(255,215,94,0.035)';
+  cx2.fillRect(0, stripY(8), W, stripY(-8) - stripY(8));
+  cx2.strokeStyle = 'rgba(255,215,94,0.28)'; cx2.lineWidth = 1;
+  cx2.beginPath(); cx2.moveTo(0, stripY(0)); cx2.lineTo(W, stripY(0)); cx2.stroke();
+
+  // the figures: what a path is read against
+  cx2.strokeStyle = 'rgba(130,175,235,0.42)'; cx2.lineWidth = 1;
+  cx2.beginPath();
+  for (const f of F.segs) {
+    const [la, ba] = F.lb(f.a), [lb2, bb] = F.lb(f.b);
+    const xa = stripX(la), xb = xa + lonDiff(lb2, la) * stripPx();
+    for (const k of [-lap, 0, lap]) {
+      if (Math.max(xa, xb) + k < -20 || Math.min(xa, xb) + k > W + 20) continue;
+      cx2.moveTo(xa + k, stripY(ba)); cx2.lineTo(xb + k, stripY(bb));
+    }
+  }
+  cx2.stroke();
+  for (const s of F.stars) {
+    const [l, b] = F.lb(s);
+    const r = stripStarR(s);
+    for (const x of xs(stripX(l))) {
+      cx2.fillStyle = colorFor(s.sp);
+      cx2.beginPath(); cx2.arc(x, stripY(b), r, 0, 6.2832); cx2.fill();
+    }
+  }
+  cx2.font = '11px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
+  cx2.textAlign = 'center'; cx2.textBaseline = 'middle';
+  cx2.fillStyle = 'rgba(125,170,230,0.8)';
+  for (const c of F.caps)
+    for (const x of xs(stripX(c.lon))) cx2.fillText(conName(c.con), x, stripY(c.lat) + 13);
+
+  // the one planet in hand
+  const t = reviewTarget(REVIEW.psel);
+  if (t) {
+    const key = t.key;
+    const x0 = stripX(planetLon(key, now));
+    const held = REVIEW.hold && REVIEW.hold.key === key;
+    const right = REVIEW.checked && planetRight(t);
+    const ring = held ? REV_PENDING : !REVIEW.checked ? null
+      : right ? REV_RIGHT : REVIEW.shown ? REV_TRUTH : REV_WRONG;
+    const ink = PLANET_INK[key] || '#ddd';
+    cx2.lineJoin = 'round'; cx2.lineCap = 'round';
+    for (const k of [-lap, 0, lap]) {
+      const pts = t.off.map(([dl, b]) => ({ x: x0 + k + dl * stripPx(), y: stripY(b) }));
+      if (Math.max(...pts.map(p => p.x)) < -30 || Math.min(...pts.map(p => p.x)) > W + 30) continue;
+      const stroke = (col, w) => {
+        cx2.strokeStyle = col; cx2.lineWidth = w; cx2.beginPath();
+        pts.forEach((p, i) => (i ? cx2.lineTo(p.x, p.y) : cx2.moveTo(p.x, p.y)));
+        cx2.stroke();
+      };
+      stroke('rgba(3,4,6,0.85)', 6);
+      if (ring) stroke(ring, 5.5);
+      stroke(ink, 2.5);
+      // where the season starts, and an arrowhead where it ends: which WAY it
+      // went is half of what a retrograde loop is
+      const a = pts[0], z = pts[pts.length - 1], y = pts[pts.length - 2] || a;
+      cx2.fillStyle = ink;
+      cx2.beginPath(); cx2.arc(a.x, a.y, 3, 0, 6.2832); cx2.fill();
+      let ux = z.x - y.x, uy = z.y - y.y;
+      const L = Math.hypot(ux, uy);
+      if (L > 0.3) {
+        ux /= L; uy /= L;
+        cx2.beginPath();
+        cx2.moveTo(z.x + ux * 7, z.y + uy * 7);
+        cx2.lineTo(z.x - uy * 4.5, z.y + ux * 4.5);
+        cx2.lineTo(z.x + uy * 4.5, z.y - ux * 4.5);
+        cx2.closePath(); cx2.fill();
+      } else {
+        // a planet that hardly moves all season is a dot, not a line
+        cx2.beginPath(); cx2.arc(z.x, z.y, 4, 0, 6.2832); cx2.fill();
+      }
+      const top = Math.min(...pts.map(p => p.y));
+      const cx = pts.reduce((s, p) => s + p.x, 0) / pts.length;
+      cx2.font = '600 12.5px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
+      const w = cx2.measureText(t.label).width + 8;
+      const c = { x: cx, y: top - 14, w };
+      PLANET_DRAWN.push({ key, pts, c });
+      cx2.fillStyle = 'rgba(3,4,6,0.8)';
+      cx2.fillRect(c.x - w / 2, c.y - 8, w, 16);
+      cx2.fillStyle = ring && !held ? ring : ink;
+      cx2.fillText(t.label, c.x, c.y);
+    }
+    cx2.lineJoin = 'miter'; cx2.lineCap = 'butt';
+  }
+  cx2.textAlign = 'left';
+}
+
+// The piece under a pixel: on its name, or near its path.
+function planetPieceAt(px, py) {
+  if (!planetOn()) return null;
+  const reach = coarse() ? 20 : 11;
+  const pad = coarse() ? 6 : 2;
+  for (const d of PLANET_DRAWN) {
+    if (Math.abs(px - d.c.x) <= d.c.w / 2 + pad && Math.abs(py - d.c.y) <= 8 + pad) return d.key;
+    for (let j = 0; j < d.pts.length; j++) {
+      const a = d.pts[j], b = d.pts[j + 1] || a;
+      const dx = b.x - a.x, dy = b.y - a.y, L2 = dx * dx + dy * dy;
+      const u = L2 ? Math.max(0, Math.min(1, ((px - a.x) * dx + (py - a.y) * dy) / L2)) : 0;
+      if (Math.hypot(px - a.x - u * dx, py - a.y - u * dy) <= reach) return d.key;
+    }
+  }
+  return null;
+}
+// Held by where the finger is in LONGITUDE: the piece keeps the offset it was
+// taken at, so it does not jump to centre itself on the fingertip.
+function planetGrab(px, py) {
+  if (!planetOn() || REVIEW.checked) return false;
+  const key = planetPieceAt(px, py);
+  if (!key) return false;
+  const lon = planetLon(key, performance.now());
+  REVIEW.anim.delete(key);
+  REVIEW.hold = { key, x: px, y: py, lon, grip: lonDiff(lon, stripLon(px)), planets: true };
+  return true;
+}
+function planetFollow() {
+  const h = REVIEW.hold;
+  h.lon = (stripLon(h.x) + h.grip + 360) % 360;
+}
+function planetMove(px, py) {
+  const h = REVIEW.hold;
+  if (!h) return;
+  moved += Math.abs(px - h.x) + Math.abs(py - h.y);
+  h.x = px; h.y = py;
+  planetFollow();
+}
+// Let go and it stays where it was put. No snapping: a slot to snap to would
+// be the answer, drawn.
+function planetDrop() {
+  const h = REVIEW.hold;
+  if (!h) return;
+  REVIEW.hold = null; MAP_TICK = null;
+  if (Math.abs(lonDiff(h.lon, REVIEW.plon.get(h.key))) > 0.05) REVIEW.moved.add(h.key);
+  REVIEW.plon.set(h.key, h.lon);
+  renderReview();
+}
+function planetShow() {
+  const t0 = performance.now();
+  for (const t of REVIEW.targets)
+    if (!planetRight(t)) REVIEW.anim.set(t.key, { from: REVIEW.plon.get(t.key), t0 });
+}
+
+function planetPanelHTML() {
+  const n = REVIEW.targets.length, right = reviewScore();
+  const t = reviewTarget(REVIEW.psel);
+  let h = `<p class="ask">Pick a planet. Its line is where it went over `
+    + `${esc(planetSeason().label)} ${SEASON_YEAR} — from the dot to the arrow — and it `
+    + `starts in the wrong place. <em>Drag it sideways</em> to where it belongs, then `
+    + `pick the next. Drag the black to slide the chart.</p>`;
+  // the row of planets: the one in hand, the ones moved, and after the check
+  // which were right
+  h += `<div class="tray">`;
+  for (const x of REVIEW.targets) {
+    let cls = '';
+    if (REVIEW.checked) cls = planetRight(x) ? 'right' : 'wrong';
+    if (x.key === REVIEW.psel) cls += (cls ? ' ' : '') + 'sel';
+    else if (!REVIEW.checked && REVIEW.moved.has(x.key)) cls = 'put';
+    h += `<button class="${cls}" data-planet="${x.key}">`
+      + `<span class="dot" style="background:${PLANET_INK[x.key]}"></span>${esc(x.label)}</button>`;
+  }
+  h += `</div>`;
+  h += `<div class="go">`;
+  const loose = n - REVIEW.moved.size;
+  if (!REVIEW.checked)
+    h += `<button class="primary" id="rcheck">check${loose > 0 ? ` (${loose} not moved)` : ''}</button>`;
+  else {
+    h += `<button class="primary" id="ragain">deal this season again</button>`;
+    if (right < n) h += `<button id="rshow"${REVIEW.shown ? ' disabled' : ''}>show me</button>`;
+  }
+  h += `<span class="kbd">1–${n} · ⏎</span></div>`;
+  if (REVIEW.checked) {
+    const misses = [];
+    for (const x of REVIEW.targets) {
+      if (planetRight(x)) continue;
+      const off = lonDiff(REVIEW.plon.get(x.key), x.home);
+      misses.push(`<li><em>${esc(x.label)}</em> — ${Math.round(Math.abs(off))}° too far `
+        + `${off > 0 ? 'east' : 'west'}</li>`);
+    }
+    h += `<div class="why${misses.length ? ' miss' : ''}">`;
+    h += misses.length ? `${right} of ${n} within ${PLANET_TOL_DEG}°. Pick one to see it.`
+        + `<ul>${misses.join('')}</ul>`
+      : `All ${n} where they were.<div class="d">The slow ones barely move in a season — `
+        + `try the next one and see which did.</div>`;
+    h += `</div>`;
+  }
+  return h;
+}
+
 // ---- the panel -----------------------------------------------------------
 function renderReview() {
   const el = qel('review');
@@ -6737,8 +7295,10 @@ function renderReview() {
     + `${esc(REVIEW_KINDS.find(k => k.id === REVIEW.kind).label)}</span>`
     + `<span>${spec
         ? (BY_CLASS.size ? `${BY_CLASS.size} of 7 classes on the shelf` : 'no frames')
-        : REVIEW.checked ? `<b>${right}</b>/${n} ${REVIEW.kind === 'map' ? 'in place' : 'placed right'}`
+        : REVIEW.checked ? `<b>${right}</b>/${n} ${REVIEW.kind === 'map' || REVIEW.kind === 'planets'
+                                               ? 'in place' : 'placed right'}`
         : REVIEW.kind === 'map' ? `${n} shapes, shuffled`
+        : REVIEW.kind === 'planets' ? `${n} paths, shuffled`
                          : `${put} of ${n} placed`}</span></div>`;
 
   if (spec) {
@@ -6751,6 +7311,8 @@ function renderReview() {
     h += ladderHTML();
   } else if (!n) {
     h += `<p class="ask">Nothing in this catalogue to place for that group.</p>`;
+  } else if (REVIEW.kind === 'planets') {
+    h += planetPanelHTML();
   } else if (REVIEW.kind === 'map') {
     h += mapPanelHTML();
   } else {
@@ -6765,7 +7327,16 @@ function renderReview() {
           + 'the star it belongs to.'} `
       + `Nothing is marked until you <em>check</em>.</p>`;
     h += `<div class="tray">`;
+    // A sorted tray is two runs -- names A to Z, then the designations by
+    // constellation -- and without a line between them the second run reads
+    // as the alphabet starting over. Only when there are both.
+    const sorted = REVIEW.kind === 'stars' && REVIEW.level !== 'easy';
+    const named = k => { const t = reviewTarget(k); return !!(t && properName(t.star)); };
+    const split = sorted && REVIEW.chips.some(named)
+      ? REVIEW.chips.findIndex(k => !named(k)) : -1;
     for (const k of REVIEW.chips) {
+      if (split > 0 && k === REVIEW.chips[split])
+        h += `<div class="sub">designations, by constellation</div>`;
       // A placed name stays in the tray rather than leaving it: picking it up
       // again to move it is most of how a board like this is actually worked,
       // and a tray that empties as you go also counts down to the last one.
@@ -6843,24 +7414,36 @@ function renderReview() {
   }
 
   // ---- what is being reviewed
-  const map = REVIEW.kind === 'map';
-  const groups = map ? MAP_GROUPS : REVIEW_GROUPS;
-  const at = map ? REVIEW.mapGroup : REVIEW.group;
-  h += `<div id="rsetup"><div class="lab">${map ? 'groups' : 'group'}</div><div class="segs">`;
+  const map = REVIEW.kind === 'map', pl = REVIEW.kind === 'planets';
+  const groups = map ? MAP_GROUPS : pl ? PLANET_SEASONS : REVIEW_GROUPS;
+  const at = map ? REVIEW.mapGroup : pl ? REVIEW.planetSeason : REVIEW.group;
+  h += `<div id="rsetup"><div class="lab">${map ? 'groups' : pl ? `season — ${SEASON_YEAR}`
+                                             : 'group'}</div><div class="segs">`;
   for (let i = 0; i < groups.length; i++)
     h += `<button data-g="${i}" class="${at === i ? 'on' : ''}">`
       + `${esc(groups[i].label)}</button>`;
   h += `</div><div class="lab">what to review</div><div class="segs">`;
   for (const k of REVIEW_KINDS) {
     if (k.id === 'spectra' && !catPossible('spec')) continue;
+    if (k.id === 'planets' && !planetsPossible()) continue;
     h += `<button data-rk="${k.id}" class="${REVIEW.kind === k.id ? 'on' : ''}">`
       + `${k.label}</button>`;
   }
   h += `</div>`;
+  // The count beside each level is for THIS group, the way the quiz's is for
+  // its pool: how big a board is is the thing worth knowing before you open
+  // one of ninety names.
+  if (REVIEW.kind === 'stars') {
+    h += `<div class="lab">level — how far into the group's stars</div><div class="segs">`;
+    for (const k of REVIEW_LEVELS)
+      h += `<button data-rl="${k}" class="${REVIEW.level === k ? 'on' : ''}">${k}`
+        + ` <span class="d">${reviewStarPool(k).length}</span></button>`;
+    h += `</div>`;
+  }
   if (spec && BY_CLASS.size)
     h += `<div class="segs"><button id="rhide" class="${REVIEW.specHide ? 'on' : ''}">`
       + `hide the labels</button></div>`;
-  if (!spec)
+  if (!spec && !pl)
     h += `<div class="segs"><button id="rnear" class="${REVIEW.near ? 'on' : ''}">`
       + `neighbours</button></div>`;
   h += `</div>`;
@@ -6868,6 +7451,9 @@ function renderReview() {
   el.innerHTML = h;
   if (spec) paintLadder(el);
 
+  el.querySelectorAll('[data-planet]').forEach(b => {
+    b.onclick = () => selectPlanet(b.dataset.planet);
+  });
   el.querySelectorAll('[data-chip]').forEach(b => {
     b.onclick = () => { REVIEW.sel = b.dataset.chip; renderReview(); };
   });
@@ -6882,12 +7468,16 @@ function renderReview() {
     d.onclick = () => { REVIEW.specShown.add(d.dataset.l); renderReview(); };
   });
   const fr = qel('rframe');
-  if (fr) fr.onclick = () => { frameBoard(); renderReview(); };
+  if (fr) fr.onclick = () => {
+    if (REVIEW.kind === 'planets') framePlanets(); else frameBoard();
+    renderReview();
+  };
   const ck = qel('rcheck'); if (ck) ck.onclick = checkBoard;
   const ag = qel('ragain'); if (ag) ag.onclick = () => { buildBoard(); reviewPose(); renderReview(); };
   const sw = qel('rshow');
   if (sw) sw.onclick = () => {
     if (REVIEW.kind === 'map' && !REVIEW.shown) mapShow();
+    if (REVIEW.kind === 'planets' && !REVIEW.shown) planetShow();
     REVIEW.shown = true; renderReview();
   };
   const nb = qel('rnear');
@@ -6914,10 +7504,20 @@ function renderReview() {
       if (REVIEW.kind === 'map') {
         if (i === REVIEW.mapGroup) return;
         REVIEW.mapGroup = i;
+      } else if (REVIEW.kind === 'planets') {
+        if (i === REVIEW.planetSeason) return;
+        REVIEW.planetSeason = i;
       } else {
         if (i === REVIEW.group) return;
         REVIEW.group = i;
       }
+      buildBoard(); reviewPose(); renderReview();
+    };
+  });
+  el.querySelectorAll('[data-rl]').forEach(b => {
+    b.onclick = () => {
+      if (b.dataset.rl === REVIEW.level) return;
+      REVIEW.level = b.dataset.rl;
       buildBoard(); reviewPose(); renderReview();
     };
   });
@@ -6981,12 +7581,15 @@ window.addEventListener('keydown', e => {
     if (REVIEW.kind === 'spectra') return;
     if (/^[1-9]$/.test(e.key)) {
       const i = parseInt(e.key, 10) - 1;
-      if (REVIEW.kind !== 'map' && !REVIEW.checked && i < REVIEW.chips.length) {
+      if (REVIEW.kind === 'planets' && i < REVIEW.targets.length) {
+        selectPlanet(REVIEW.targets[i].key); e.preventDefault();
+      } else if (REVIEW.kind !== 'map' && REVIEW.kind !== 'planets'
+          && !REVIEW.checked && i < REVIEW.chips.length) {
         REVIEW.sel = REVIEW.chips[i]; renderReview(); e.preventDefault();
       }
     } else if (e.key === 'Enter') {
       if (REVIEW.checked) { buildBoard(); reviewPose(); }
-      else if (REVIEW.place.size) checkBoard();
+      else if (REVIEW.place.size || REVIEW.kind === 'planets') checkBoard();
       renderReview();
       e.preventDefault();
     }
@@ -7059,7 +7662,10 @@ function syncSheet(reframe) {
 // targets; a question re-poses, which is exactly what "show me again" does.
 function reframeForSheet() {
   try {
-    if (REVIEW.on) { if (REVIEW.kind !== 'spectra') frameBoard(); }
+    if (REVIEW.on) {
+      if (REVIEW.kind === 'planets') framePlanets();
+      else if (REVIEW.kind !== 'spectra') frameBoard();
+    }
     else if (QUIZ.q) { QUIZ.q.pose(); if (QUIZ.answered) QUIZ.q.reveal(); }
   } catch (e) { /* a re-frame is a convenience, never a crash */ }
 }
