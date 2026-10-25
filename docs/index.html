@@ -408,6 +408,10 @@
         border-radius: 7px; padding: 3px 9px; font: inherit; font-size: .72rem;
         cursor: pointer; }
   #rsetup button.on { background: #0d2b4e; border-color: var(--run); color: var(--run); }
+  #rsetup select { background: #161b22; border: 1px solid var(--border); color: var(--dim);
+        border-radius: 7px; padding: 3px 6px; font: inherit; font-size: .72rem;
+        cursor: pointer; max-width: 100%; }
+  #rsetup select.on { background: #0d2b4e; border-color: var(--run); color: var(--run); }
 
   body.reviewing #quiz { display: none; }
   body:not(.reviewing) #review { display: none; }
@@ -509,7 +513,9 @@
     #mode button { min-height: 44px; }
     #quiz .opts button { font-size: .9rem; }
     #review .tray button { font-size: .86rem; padding: 6px 12px; }
-    #qsetup button, #rsetup button { min-height: 34px; padding: 4px 11px; }
+    #qsetup button, #rsetup button, #rsetup select { min-height: 34px; padding: 4px 11px; }
+    /* under 16px iOS zooms the page in when a select is tapped */
+    #rsetup select { font-size: 16px; }
 
     /* Hover-only affordances have no touch equivalent. The legend is not one
        of them -- what it loses on a phone is the hover, not the ramp, and a
@@ -5894,6 +5900,7 @@ const REVIEW = {
   plon: new Map(),      // planet key -> the ecliptic longitude it is put at
   kind: 'shapes',
   level: 'easy',        // the star board's: see REVIEW_LEVELS
+  single: null,         // the star board's "individual": one constellation, or null
   targets: [],          // {key, label, stars, dir, star?}
   chips: [],            // the same keys, shuffled: the tray's order
   place: new Map(),     // target key -> the chip key put on it
@@ -5934,8 +5941,30 @@ function mapGroup() {
       cons: m.groups.flatMap(id => REVIEW_GROUPS.find(g => g.id === id).cons) });
   return MAP_GROUP_CACHE.get(m.id);
 }
+// "Individual" is the step before hard: one constellation's every star, so
+// the board that hard asks for across a whole group can be learnt a figure
+// at a time. It is a group of one, with no outer ring, and it only exists on
+// the star board -- switch to shapes and the group it came from is back.
+const SINGLE_CACHE = new Map();
+function singleGroup(abbr) {
+  if (!SINGLE_CACHE.has(abbr))
+    SINGLE_CACHE.set(abbr, { id: 'one:' + abbr, label: conName(abbr), cons: [abbr] });
+  return SINGLE_CACHE.get(abbr);
+}
+// The constellations "individual" offers: every one some group's hard board
+// asks about, under the group it belongs to.
+function singleChoices() {
+  return REVIEW_GROUPS.map(g => ({ label: g.label,
+    cons: g.cons.concat(g.more || []).filter(a => CONS.has(a)) }));
+}
+function reviewSingle() {
+  return REVIEW.kind === 'stars' && REVIEW.single && CONS.has(REVIEW.single)
+    ? REVIEW.single : null;
+}
 function reviewGroup() {
   if (REVIEW.kind === 'map') return mapGroup();
+  const one = reviewSingle();
+  if (one) return singleGroup(one);
   return REVIEW_GROUPS[REVIEW.group] || REVIEW_GROUPS[0];
 }
 // The constellations a board is played over: the group, and on a star board
@@ -5951,6 +5980,8 @@ function reviewCons(level) {
 // The stars a star board asks about, at a level. A function of its own so the
 // level buttons can say how many each one is before it is chosen.
 function reviewStarPool(level) {
+  const one = reviewSingle();
+  if (one) return everyStar([one]);
   const g = reviewGroup();
   const bright = (x, y) => (x.vmag ?? 99) - (y.vmag ?? 99);
   // Proper names only, below hard. Placing "Alioth" and "Mizar" is the
@@ -5973,7 +6004,10 @@ function reviewStarPool(level) {
     const rest = reviewStarPool('hard').filter(s => !have.has(s));
     return easy.concat(rest.slice(0, REVIEW_STARS_MEDIUM - easy.length)).sort(bright);
   }
-  const cons = reviewCons(level);
+  return everyStar(reviewCons(level));
+}
+function everyStar(cons) {
+  const bright = (x, y) => (x.vmag ?? 99) - (y.vmag ?? 99);
   // hard: everything that can be called something other than a catalogue
   // number. bayerName() will spell `HD 50896` as if HD were a constellation,
   // so a designation only counts when it really ends in a genitive. A figure
@@ -6032,7 +6066,7 @@ function buildBoard() {
   // Shuffled, and shuffled ONCE: a tray listed in the order the targets were
   // built is a tray listed west to east, which answers the board. A star
   // board past a dozen names is sorted instead -- see trayOrder().
-  REVIEW.chips = REVIEW.kind === 'stars' && REVIEW.level !== 'easy'
+  REVIEW.chips = REVIEW.kind === 'stars' && (REVIEW.level !== 'easy' || reviewSingle())
     ? trayOrder(ts) : shuffle(ts.map(t => t.key));
   REVIEW.place = new Map();
   REVIEW.sel = REVIEW.chips[0] || null;
@@ -7330,7 +7364,7 @@ function renderReview() {
     // A sorted tray is two runs -- names A to Z, then the designations by
     // constellation -- and without a line between them the second run reads
     // as the alphabet starting over. Only when there are both.
-    const sorted = REVIEW.kind === 'stars' && REVIEW.level !== 'easy';
+    const sorted = REVIEW.kind === 'stars' && (REVIEW.level !== 'easy' || !!reviewSingle());
     const named = k => { const t = reviewTarget(k); return !!(t && properName(t.star)); };
     const split = sorted && REVIEW.chips.some(named)
       ? REVIEW.chips.findIndex(k => !named(k)) : -1;
@@ -7406,7 +7440,9 @@ function renderReview() {
       h += `<div class="why${misses.length ? ' miss' : ''}">`;
       if (!misses.length)
         h += `All ${n} in the right place.`
-          + `<div class="d">Try the next group, or the star names inside this one.</div>`;
+          + `<div class="d">${reviewSingle()
+            ? 'Try another constellation, or its whole group at hard.'
+            : 'Try the next group, or the star names inside this one.'}</div>`;
       else
         h += `${right} of ${n}.<ul>${misses.join('')}</ul>`;
       h += `</div>`;
@@ -7416,13 +7452,31 @@ function renderReview() {
   // ---- what is being reviewed
   const map = REVIEW.kind === 'map', pl = REVIEW.kind === 'planets';
   const groups = map ? MAP_GROUPS : pl ? PLANET_SEASONS : REVIEW_GROUPS;
-  const at = map ? REVIEW.mapGroup : pl ? REVIEW.planetSeason : REVIEW.group;
+  const one = reviewSingle();
+  const at = map ? REVIEW.mapGroup : pl ? REVIEW.planetSeason : one ? -1 : REVIEW.group;
   h += `<div id="rsetup"><div class="lab">${map ? 'groups' : pl ? `season — ${SEASON_YEAR}`
                                              : 'group'}</div><div class="segs">`;
   for (let i = 0; i < groups.length; i++)
     h += `<button data-g="${i}" class="${at === i ? 'on' : ''}">`
       + `${esc(groups[i].label)}</button>`;
-  h += `</div><div class="lab">what to review</div><div class="segs">`;
+  h += `</div>`;
+  // Beside the groups, and only on the star board: picking a constellation
+  // here takes the place of the group above, so no group button is lit while
+  // one is chosen. Each option carries its count, the way the levels do.
+  if (REVIEW.kind === 'stars') {
+    h += `<div class="lab">individual — every star in one constellation</div>`
+      + `<div class="segs"><select id="rsingle" class="${one ? 'on' : ''}">`
+      + `<option value=""${one ? '' : ' selected'}>— a whole group —</option>`;
+    for (const c of singleChoices()) {
+      h += `<optgroup label="${esc(c.label)}">`;
+      for (const a of c.cons)
+        h += `<option value="${a}"${one === a ? ' selected' : ''}>`
+          + `${esc(conName(a))} (${everyStar([a]).length})</option>`;
+      h += `</optgroup>`;
+    }
+    h += `</select></div>`;
+  }
+  h += `<div class="lab">what to review</div><div class="segs">`;
   for (const k of REVIEW_KINDS) {
     if (k.id === 'spectra' && !catPossible('spec')) continue;
     if (k.id === 'planets' && !planetsPossible()) continue;
@@ -7433,7 +7487,7 @@ function renderReview() {
   // The count beside each level is for THIS group, the way the quiz's is for
   // its pool: how big a board is is the thing worth knowing before you open
   // one of ninety names.
-  if (REVIEW.kind === 'stars') {
+  if (REVIEW.kind === 'stars' && !one) {
     h += `<div class="lab">level — how far into the group's stars</div><div class="segs">`;
     for (const k of REVIEW_LEVELS)
       h += `<button data-rl="${k}" class="${REVIEW.level === k ? 'on' : ''}">${k}`
@@ -7508,12 +7562,20 @@ function renderReview() {
         if (i === REVIEW.planetSeason) return;
         REVIEW.planetSeason = i;
       } else {
-        if (i === REVIEW.group) return;
+        if (i === REVIEW.group && !reviewSingle()) return;
         REVIEW.group = i;
+        if (REVIEW.kind === 'stars') REVIEW.single = null;
       }
       buildBoard(); reviewPose(); renderReview();
     };
   });
+  const sg = REVIEW.kind === 'stars' ? qel('rsingle') : null;
+  if (sg) sg.onchange = () => {
+    const v = sg.value || null;
+    if (v === reviewSingle()) return;
+    REVIEW.single = v;
+    buildBoard(); reviewPose(); renderReview();
+  };
   el.querySelectorAll('[data-rl]').forEach(b => {
     b.onclick = () => {
       if (b.dataset.rl === REVIEW.level) return;
