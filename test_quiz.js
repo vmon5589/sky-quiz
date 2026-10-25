@@ -290,7 +290,7 @@ src += '\n;globalThis.__page = { build, resize, quizBoot, nextQuestion, answer, 
      + 'REVIEW_LEVELS, reviewTarget, PLANET_SEASONS, PLANET_BODIES, PLANET_TOL_DEG, '
      + 'planetOn, planetsPossible, planetPieceAt, planetLon, planetRight, eclLB, STRIP, stripPx, '
      + 'stripY, planetGrab, reframeForSheet, R0, ZODIAC, stripFigs, '
-     + 'lonDiff, mapCancel, get PLANET_DRAWN() { return PLANET_DRAWN; }, REVIEW_STARS_MEDIUM, REVIEW_HARD_MAG, reviewCons, reviewStarPool, '
+     + 'lonDiff, mapCancel, get PLANET_DRAWN() { return PLANET_DRAWN; }, REVIEW_STARS_MEDIUM, REVIEW_HARD_MAG, reviewCons, reviewStarPool, everyStar, reviewSingle, singleChoices, '
      + 'SPEC_ORDER, CLASS_SHORT, CLASS_MARKS, displayType, conStars, '
      + 'figureComponents, conTargets, buildBoard, reviewPose, renderReview, '
      + 'reviewHit, reviewClick, checkBoard, setMode, reviewScore, reviewLabel, '
@@ -2054,6 +2054,108 @@ ok(P.QUIZ.best === 25, `best streak kept: ${P.QUIZ.best}`);
   R.level = wasLevel; R.group = wasGroup; R.kind = wasKind;
   P.buildBoard(); P.setMode(wasOn); settle();
   console.log(`  levels: ${sizes.join(', ')}`);
+}
+
+// ============================================ "individual": one constellation
+// The step before hard: every star hard would ask about, one figure at a
+// time. Each choice is a constellation some group's hard board covers; its
+// board is exactly hard's stars that live in it, and every one of them can be
+// put down -- on a desktop sky and clear of a phone's half-height sheet.
+{
+  const R = P.REVIEW;
+  const was = { on: R.on, kind: R.kind, group: R.group, level: R.level, single: R.single };
+  const INSET0 = P.SKY_INSET;
+  P.setMode(true);
+  const sizes = [];
+  const offered = P.singleChoices().flatMap(c => c.cons);
+  ok(offered.length === new Set(offered).size, 'individual: a constellation is offered twice');
+  for (const G of P.REVIEW_GROUPS)
+    for (const a of G.cons.concat(G.more))
+      ok(offered.includes(a), `individual: ${a} (${G.id}) is not offered`);
+  R.kind = 'stars'; R.level = 'easy';
+  for (let g = 0; g < P.REVIEW_GROUPS.length; g++) {
+    const G = P.REVIEW_GROUPS[g];
+    R.group = g; R.single = null;
+    const hard = P.reviewStarPool('hard');
+    for (const a of G.cons.concat(G.more)) {
+      R.single = a;
+      const tag = `individual/${a}`;
+      const pool = P.reviewStarPool(R.level);
+      // whatever level is set, the board is this constellation's hard stars
+      const want = hard.filter(s => P.conStars(a).includes(s));
+      ok(pool.length === want.length && want.every(s => pool.includes(s)),
+         `${tag}: ${pool.length} stars, hard has ${want.length} of them`);
+      ok(pool.length > 0, `${tag}: an empty board`);
+      P.buildBoard(); P.reviewPose(); settle(); P.renderReview();
+      const ts = R.targets;
+      sizes.push(`${a} ${ts.length}`);
+      ok(ts.length === pool.length, `${tag}: built ${ts.length} of ${pool.length}`);
+      ok(new Set(ts.map(t => t.label)).size === ts.length, `${tag}: two chips read the same`);
+      ok([...P.ISOLATE].join(',') === a, `${tag}: isolated ${[...P.ISOLATE].join(',')}`);
+      const html = P.reviewHTML();
+      ok(!/data-rl=/.test(html), `${tag}: the level buttons show`);
+      ok(new RegExp(`<option value="${a}" selected>`).test(html), `${tag}: not selected in the menu`);
+      ok(!/data-g="\d+" class="on"/.test(html), `${tag}: a group button is still lit`);
+      const seen = new Map(P.proj.map(q => [q.s, q]));
+      const on = q => q && q.x > 0 && q.x < P.W() && q.y > 0 && q.y < P.H();
+      ok(ts.every(t => on(seen.get(t.star))),
+         `${tag}: ${ts.filter(t => !on(seen.get(t.star))).length} targets off screen`);
+      let wrong = 0, eg = null;
+      for (const t of ts) {
+        const q = seen.get(t.star);
+        if (!on(q)) continue;
+        const got = P.reviewHit(q.x, q.y);
+        if (got !== t) { wrong++; eg = eg || `${t.label} -> ${got ? got.label : 'nothing'}`; }
+      }
+      ok(wrong === 0, `${tag}: ${wrong} clicks landed on the wrong name (e.g. ${eg})`);
+      for (const t of ts) {
+        const q = seen.get(t.star);
+        if (q) { R.sel = t.key; P.reviewClick(q.x, q.y); }
+      }
+      P.checkBoard();
+      ok(P.reviewScore() === ts.length, `${tag}: played correctly and scored ${P.reviewScore()}/${ts.length}`);
+      P.SKY_INSET = Math.round(P.H() * 0.52);
+      P.buildBoard(); P.reviewPose(); settle();
+      const seen2 = new Map(P.proj.map(q => [q.s, q]));
+      const under = R.targets.filter(t => { const q = seen2.get(t.star); return !q || q.y > P.H() - P.SKY_INSET; });
+      ok(under.length === 0, `${tag}: ${under.length} targets under a half-height sheet`);
+      P.SKY_INSET = INSET0;
+    }
+  }
+
+  // the menu drives it, and the group buttons and the other boards undo it
+  {
+    R.group = 1; R.single = null; R.kind = 'stars'; R.level = 'hard';
+    P.buildBoard(); P.reviewPose(); P.renderReview();
+    ok(/<select id="rsingle"/.test(P.reviewHTML()), 'individual: no menu on the star board');
+    const sel = document.getElementById('rsingle');
+    ok(typeof sel.onchange === 'function', 'individual: the menu is not bound');
+    sel.value = 'Lyr'; sel.onchange();
+    ok(R.single === 'Lyr' && R.targets.length === P.everyStar(['Lyr']).length,
+       'individual: picking Lyra did not build a Lyra board');
+    ok(R.targets.some(t => t.label === 'Vega'), 'individual: Lyra has no Vega');
+    // the group's own button -- the one that was lit before -- takes it back
+    const btn = document.getElementById('review').querySelectorAll('[data-g]')
+      .find(b => b.dataset.g === '1');
+    btn.onclick();
+    ok(R.single === null && R.group === 1 && R.level === 'hard'
+       && R.targets.length === P.reviewStarPool('hard').length,
+       'individual: the group button did not go back to the group');
+    R.single = 'Lyr'; P.renderReview();
+    sel.value = ''; sel.onchange();
+    ok(R.single === null && /data-rl=/.test(P.reviewHTML()),
+       'individual: "a whole group" did not bring the levels back');
+    // a shape board never sees it
+    R.single = 'Lyr'; R.kind = 'shapes';
+    P.buildBoard(); P.reviewPose(); P.renderReview();
+    ok(P.reviewSingle() === null && R.targets.length >= P.REVIEW_GROUPS[1].cons.length,
+       'individual: a shape board was cut down to one constellation');
+    ok(!/rsingle/.test(P.reviewHTML()), 'individual: the menu shows on a shape board');
+  }
+
+  Object.assign(R, { kind: was.kind, group: was.group, level: was.level, single: was.single });
+  P.buildBoard(); P.setMode(was.on); settle();
+  console.log(`  individual: ${sizes.join(', ')}`);
 }
 
 
